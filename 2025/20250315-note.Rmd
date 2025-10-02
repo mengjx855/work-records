@@ -1,0 +1,1295 @@
+---
+title: "MGX WGS on PDCoV Sus feces ZhangYQ"
+author: "Jinxin Meng"
+date: "2025-03-15"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## pipeline
+
+```{bash}
+# qc
+cat raw_fq.filelist | parallel -j 6 --colsep="\t" run_fastp_rmhost.sh {2} pig clean_fq/{1}
+
+# assemble
+cat clean_fq.filelist | parallel -j 5 --colsep="\t" run_megahit.sh {2} assembly/{1}
+../sample_name | parallel -j 2 seqkit seq -g -m 1500 {}.fa \| seqkit replace -p \" .\*\" -r \"\" \| seqkit replace -p \"\^\" -r \"{}\|\" -o {}.m1500.fa
+
+# semibin2
+cat sample_name | parallel -j 6 SemiBin2 single_easy_bin -t 32 --random-seed 2025 -i assembly/{}.m1500.fa --depth-metabat2 metabat2/tmp/{}.depth --environment pig_gut -o semibin2/{}
+ls */output_bins/* | perl -ne 'chomp;$x=$_;@s=split/\//;$s[2]=~s/SemiBin_//;print "cp $_ bins/$s[0].$s[2]\n"' | sh
+cat ../sample_name | parallel -j 2 tar -zcf {}.tar.gz {}
+
+# checkm2
+checkm2 predict --input semibin2/bins/ --output-directory checkm2 --tmpdir /tmp -x .fa --threads 56 --force
+awk -F '\t' '$2>50 && $3<=10' quality_report.tsv > bins.after_qc.MQ.tsv
+awk -F '\t' '$2>90 && $3<=5' quality_report.tsv > bins.after_qc.HQ.tsv
+awk -F '\t' '$2>=70 && $3<=5 && ($2-$3*5)>55' quality_report.tsv > bins.after_qc.QS.tsv
+
+# dRep
+dRep compare dRep/ -g checkm2/bins.after_qc.MQ.filepath -d -pa 0.9 -sa 0.95 -nc 0.30 -cm larger -p 50 --S_algorithm fastANI
+parse_dRep.pl dRep/data_tables/Cdb.csv dRep.clu.info -ckm2 checkm2/bins.after_qc.MQ.tsv
+
+# taxa
+gtdbtk classify_wf --cpus 80 --pplacer_cpus 12 --skip_ani_screen --genome_dir species_fa/ --out_dir gtdbtk_out -x fa
+
+# abundance
+# perl -ne 'chomp;@s=split/\t/; open I, "$s[1]"; $n=0; while(<I>){chomp;if(/>/){$n2=sprintf "%03d", $n; print ">$s[0]\|$n2\n"; $n+=1}else{print "$_\n"}}' gtdbtk/species.filelist > profile/species.fa
+cat ../gtdbtk/species.filelist | parallel -j 5 --colsep="\t" seqkit replace -p \"\.\*\" -r \"{1}\|{nr}\" {2} -o species_fa/{1}.fa
+minimap2 -d species.mmi species.fa
+cat ../clean_fq.filelist | parallel -j 6 --colsep="\t" ../run_minimap2.sh {2} species.mmi sort_bam/{1}
+cat ../sample_name | parallel -j 6 ../run_coverm.sh sort_bam/{}.sort.bam species_fa.filepath cvm_out_c50/{}.c50 50
+cat ../sample_name | parallel -j 3 ../run_coverm.sh sort_bam/{}.sort.bam species_fa.filepath cvm_out/{}
+combine_file_zy_folder_allsample.py -D cvm_out -suffix .cvm --skip 2 -n 1 -v 3 -o species.rc
+combine_file_zy_folder_allsample.py -D cvm_out -suffix .cvm --skip 2 -n 1 -v 4 -o species.cvg
+combine_file_zy_folder_allsample.py -D cvm_out -suffix .cvm --skip 2 -n 1 -v 6 -o species.tpm
+combine_file_zy_folder_allsample.py -D cvm_out -suffix .cvm --skip 2 -n 1 -v 8 -o species.rela_ab
+
+# mpa4
+cat clean_fq.filelist | parallel -j 5 --colsep="\t" run_metaphlan.sh {2} mpa4/{1}
+combine_file_zy_folder_allsample.py -D mpa4/ -suffix .tsv --skip 5 -n 1 -v 3 -o mpa4.tsv
+parse_mpa.py -i mpa4.tsv -o mpa4 -l p,g,s --short
+
+# humann3
+cat clean_fq1.filelist | parallel -j 5 --colsep="\t" humann3 -i {2} -o humann3/{1} --threads 24
+humann_join_tables -i humann3/ -o humann3.pathcoverage.tsv --file_name pathcoverage
+humann_join_tables -i humann3/ -o humann3.pathabundance.tsv --file_name pathabundance
+humann_join_tables -i humann3/ -o humann3.genefamilies.tsv --file_name genefamilies
+
+# prokka
+# designate PDCoV_D1_5751.65,PDCoV_D3_5751.132,PDCoV_D3_5753.72,PDCoV_D3_5756.119 as archaea
+cat checkm2/bins.after_qc.MQ.filepath | parallel -j 10 echo prokka {} --outdir prokka/{/.} --prefix {/.} --kingdom Bacteria --metagenome --addgenes --cpus 8 --quiet > run_prokka.sh
+
+# prodigal
+cat ../checkm2/bins.after_qc.MQ.filelist | parallel -j 5 --colsep="\t" seqkit replace -p \"\.\*\" -r \"{1}\|{nr}\" {2} -o fna/{1}.fa
+realpath fna/* | parallel -j 30 prodigal -q -p single -f gff -i {} -o gff/{/.}.gff -a faa/{/.}.faa -d ffn/{/.}.ffn
+
+# geneset
+cat ../prodigal/ffn/*ffn | seqkit seq -g -m 100 | seqkit replace -p "\s.*" -r "" > genes.ffn
+mmseqs easy-cluster genes_total.ffn genes . --cluster-mode 2 --cov-mode 1 --min-seq-id 0.95 -c 0.9 --kmer-per-seq-scale 0.8 --threads 112
+
+# kofamscan
+# kofamscan faa/PDCoV_D0_5743.1.faa -o xx -p /data/database/KEGG/20241226/profiles -k /data/database/KEGG/20241226/ko_list --cpu 8
+cat ../prodigal/faa.filelist | parallel -j 1 --colsep="\t" -k kofamscan {2} -o kofamscan_MAG/{1}.kofam -p /data/database/KEGG/20241226/profiles -k /data/database/KEGG/20241226/ko_list --cpu 100
+/data/software/kofamscan-1.3.0/kofamscan ../mmseqs/geneset.faa -o geneset.kofam -p /data/database/KEGG/20241226/profiles -k /data/database/KEGG/20241226/ko_list --cpu 110
+perl -ne 'chomp;next unless /^\*/;@s=split/\s+/;print "$s[1]\t$s[2]\n"' geneset.kofam > geneset.ko
+profile_aggregate_kegg.pl geneset.ko ../geneset/geneset.tpm geneset.ko.tpm
+
+# ko diamond
+diamond blastp -d /data/database/KEGG/KEGG20230401.dmnd --outfmt 6 --min-score 60 --query-cover 50 --max-target-seqs 10 -p 112 -q mmseqs/geneset.faa -o kofam2/kegg.btp >/dev/null 2>/dev/null
+perl -ne 'chomp;@s=split/\t/;if($s[0] ne $a){$s[1]=~/\|(.*)/;print "$s[0]\t$1\n";$a=$s[0]}' ko.btp > ko.tsv
+profile_aggregate_kegg.pl kofam2/ko.tsv geneset/geneset.tpm kofam2/diamond.ko.tpm
+
+cat ../prodigal/faa.filelist | parallel -j 20 --colsep="\t" -k diamond blastp -d /data/database/KEGG/KEGG20230401.dmnd --outfmt 6 --min-score 60 --query-cover 50 --max-target-seqs 10 -p 6 -q {2} -o diamond_MAGs/{1}.btp \>/dev/null 2\>/dev/null &
+seqkit replace -X ../prodigal/faa.filepath -p " .*" -r "" > MAGs.faa
+diamond blastp -d /data/database/KEGG/KEGG20230401.dmnd --outfmt 6 --min-score 60 --query-cover 50 --max-target-seqs 10 -p 112 -q MAGs.faa -o MAGs.btp >/dev/null 2>/dev/null &
+grep 'K01442' MAGs.tsv  | cut -d'|' -f1 | sort -u | csvtk join --left-join -t -H -f "1;2" - ../dRep.clu.spread | csvtk join --left-join -t -H -f "2;1" - ../gtdbtk.tsv | sort -k3,3 > bsh.tsv
+grep 'K01442\|K15870' MAGs.tsv | perl -ne 'chomp;$_=~/(\S+)\|/;print "$_\t$1\n"' | csvtk join --left-join -t -H -f "3;2" - ../dRep.clu.spread | csvtk join --left-join -t -H -f "4;1" - ../gtdbtk.tsv > bsh.tsv
+grep 'K01442\|K15868\|K15871\|K15869\|K15870\|K15872\|K07007\|K15871' MAGs.tsv | perl -ne 'chomp;$_=~/(\S+)\|/;print "$_\t$1\n"' | csvtk join --left-join -t -H -f "3;2" - ../dRep.clu.spread | csvtk join --left-join -t -H -f "4;1" - ../gtdbtk.tsv > lca.tsv
+
+# eggnog
+emapper.py --cpu 110 -i kofam2/MAGs.faa --itype proteins --output_dir COG/ --output MAG &
+
+# MGC
+ls gtdbtk/strain_fa/* | parallel -j 40 echo run_gutsmash.py -c 1 --output-dir MGC/{/.} --genefinding-tool prodigal {}
+
+# BGC
+ls gtdbtk/strain_fa/* | parallel -j 20 antismash -c 6 --output-dir BGC/{/.} --genefinding-tool prodigal --allow-long-headers {} &
+
+# geneset abundance
+minimap2 -d geneset.mmi ../mmseqs/geneset.ffn
+cat ../clean_fq.filelist | parallel -j 6 --colsep="\t" ../run_minimap2.sh {2} geneset.mmi sort_bam/{1}
+cat ../sample_name | parallel -j 5 samtools coverage sort_bam/{}.sort.bam -o cvg/{}.cvg
+combine_file_zy_folder_allsample.py -D cvg/ -suffix .cvg -n 1 -v 4 -t 1 -o geneset.rc
+combine_file_zy_folder_allsample.py -D cvg/ -suffix .cvg -n 1 -v 6 -t 1 -o geneset.cvg
+# profile_filter_by_cvg.py geneset.rc geneset.cvg 10 geneset.rc.f
+profile_rc2tpm.pl geneset.rc ../mmseqs/geneset.len geneset.tpm
+
+# phylophlan
+phylophlan_write_config_file -d a -o phylophlan/phylophlan.cfg --db_aa diamond --map_aa diamond --msa mafft --trim trimal --tree1 fasttree --overwrite
+phylophlan -i prodigal/faa_species -t a -o phylophlan/ -d phylophlan --databases_folder /data/database/phylophlan -f phylophlan/phylophlan.cfg --diversity high --nproc 100
+
+#### run_coverm.sh ####
+#!/usr/bin/bash
+
+( [ $# -lt 3 ] ) && echo -e "Usage: bash $0 [*sort.bam] [genome_filepath] [out_prefix] [covered_fraction: 0 <0-100>]" && exit 127
+
+( [ -f $3.cvm ] ) && echo "Skip sample: $3." && exit 0
+
+cvg=${4:-0}
+
+if [ $cvg -eq 0 ]; then
+    coverm genome --bam-files $1 --genome-fasta-list $2 --min-covered-fraction 0 --output-file $3.cvm \
+        --methods length count covered_fraction covered_bases tpm rpkm relative_abundance || \
+        { rm $3.cvm && exit -1; }
+else
+    coverm genome --bam-files $1 --genome-fasta-list $2 --min-covered-fraction $4 --output-file $3.cvm \
+        --methods covered_fraction covered_bases tpm rpkm relative_abundance || \
+        { rm $3.cvm && exit -1; }
+fi
+
+#### run_minimap.sh ####
+#!/usr/bin/bash
+
+( [ $# -ne 3 ] ) &&  { echo -e "Usage: $0 [fq|fq1,fq2] [*.mmi|*.fa] [out_prefix]" && exit 2; }
+( [ -e $3.sort.bam ] ) && { echo -e "Skip sample: ${3##*/} .." && exit 0; }
+
+if [[ $1 =~ "," ]];then
+    fq1=$(echo $1 | cut -d "," -f1)
+    fq2=$(echo $1 | cut -d "," -f2)
+    minimap2 --MD -t 24 -ax sr $2 $fq1 $fq2 2>>$3.log |\
+        samtools view -F 4 -@ 24 -bS | samtools sort -@ 24 -o $3.sort.bam -
+else
+    minimap2 --MD -t 24 -ax sr $2 $1 2>>$3.log |\
+        samtools view -F 4 -@ 24 -bS | samtools sort -@ 24 -o $3.sort.bam -
+fi
+```
+
+## Perl scripts
+
+```{perl}
+#### profile_rc2tpm.pl ####
+#!/usr/bin/perl
+# author : Jinxin Meng
+# created date: 2023-10-09, 21:04:05
+# modified date: 2023-11-19, 21:04:05
+use warnings;
+use strict;
+
+die "Usage: perl $0 [rc_profile] [gene_length] [out_file]\n" unless @ARGV eq 3;
+my ($gene_rc, $gene_len, $out) = @ARGV;
+my (%len, @sum) = ();
+
+open I, "<$gene_len";
+while (<I>) {
+    chomp;
+    my @s = split/\s+/;
+    $len{$s[0]} = $s[1];
+}
+close I;
+
+open I, "<$gene_rc";
+while (<I>) {
+    chomp;
+    next if /name/;
+    my @s = split/\s+/;
+    for my $i (1..$#s){
+        $sum[$i] += $s[$i]/$len{$s[0]};
+    }
+}
+
+open O, ">$out";
+seek I, 0, 0;
+while (<I>) {
+    chomp;
+    if (/name/) {
+        print O "$_\n";
+        next;
+    }
+    my @s = split/\s+/;
+    my @l = ();
+    for my $i (1..$#s){
+        $l[$i] = $s[$i]/$len{$s[0]}/$sum[$i]*1000000;
+    }
+    $l[0] = $s[0];
+    print O join("\t",@l)."\n";    
+}
+close O;
+
+#### profile_aggregate_kegg.pl ####
+#!/usr/bin/perl
+# encoding: utf-8
+# author : Jinxin Meng
+# created date: 2023-10-09, 21:06:33
+# modified date: 2023-11-19, 21:06:33
+use warnings;
+use strict;
+
+die "Usage: perl $0 [gene_to_KO] [gene_profile] [out_file]\n" unless @ARGV eq 3;
+my ($gene2KO, $gene_tpm, $out) = @ARGV;
+my (%KO, %sum) = ();
+
+open I, "<$gene2KO";
+while (<I>) {
+    chomp;
+    my @s = split /\s+/;
+    $KO{$s[0]} = $s[1];
+} 
+
+open I, "<$gene_tpm";
+open O, ">$out";
+my $line = <I>;
+print O "$line";
+while(<I>){
+    chomp;
+    my @s = split /\t/;
+    if (exists $KO{$s[0]}) {
+        for my $i (1..$#s) {
+            @{$sum{$KO{$s[0]}}}[$i-1] += $s[$i];
+        }
+    }
+}
+close I;
+
+for my $i (sort keys %sum) {
+    my $flag = 0;
+    for my $j (@{$sum{$i}}) {
+        $flag += $j;
+    }
+    print O "$i\t".join("\t",@{$sum{$i}})."\n" if $flag != 0;
+} 
+close O;
+
+#### parse_dRep.pl ####
+#!/usr/bin/perl
+# Jinxin Meng, jinxmeng@zju.edu.cn
+# created date: 2023-10-02, 01:49:47
+# modified date: 2025-03-06, 08:32:39
+use warnings;
+use strict;
+use Getopt::Long;
+
+my $use = "Usage: perl $0 [OPTIONS] [Cdb.csv] [out_file]
+OPTIONS:
+  -ckm  : checkm quality socre;
+  -ckm2 : checkm2 quality report; 
+  -len  : genome length, tab-delimited file with field name and length;
+EXAMPLE:
+  perl parse_dRep.pl Cdb.csv genome_clu.tsv
+  perl parse_dRep.pl -ckm2 quality_report.tsv Cdb.csv genome_clu.tsv\n";
+
+my ($ckm, $ckm2, $len) = (undef, undef, undef);
+&GetOptions(
+    "ckm:s"  => \$ckm,
+    "ckm2:s" => \$ckm2,
+    "len:s"  => \$len);
+
+die "$use" unless @ARGV eq 2;
+my ($cdb, $out) = @ARGV;
+
+open I, "<$cdb";
+my (%clu, @name) = (); 
+while (<I>) {
+    chomp;
+    next if (/primary_cluster/);
+    my @s = split /,/;
+    $s[0] =~ s/.(fa|fna)//;
+    push @{$clu{$s[1]}}, $s[0];
+    push @name, $s[0];
+}
+
+open O, ">$out";
+
+if ( !defined $ckm && !defined $ckm2 && !defined $len ) {
+    for my $i (sort keys %clu) {
+        my $count = scalar @{$clu{$i}};
+        print O "clu.$i\t$count\t".join(",", @{$clu{$i}})."\n";
+    }
+    close O;
+    exit 0;
+}
+
+my %value; 
+if (defined $ckm) {
+    open I, "$ckm";
+    while (<I>) {
+        chomp;
+        next if /Completeness/;
+        my @s = split /\t/;
+        $value{$s[0]} = $s[11] - 5 * $s[12] if (grep {$_ eq $s[0]} @name);
+    }
+} 
+
+if (defined $ckm2) {
+    open I,"<$ckm2";
+    while (<I>) {
+        chomp;
+        next if /Completeness/;
+        my @s = split /\t/;
+        $value{$s[0]} = $s[1] - 5 * $s[2] if (grep {$_ eq $s[0]} @name);
+    }
+} 
+
+if (defined $len) {
+    open I, "<$len";
+    while (<I>) {
+        chomp;
+        next if /len/;
+        my @s = split/\t/;
+        $value{$s[0]} = $s[1];
+    }
+} 
+
+select_rep(\%clu, \%value); # 调用子程序并传递哈希的引用
+
+close O; 
+
+sub select_rep {
+    my ($clu, $value) = @_;  # 获取哈希的引用
+    my %clu = %{$clu};   # 将哈希引用解引用为哈希
+    my %value = %{$value};       # 将哈希引用解引用为哈希
+    for my $i (sort keys %clu) {
+        my $count = scalar @{$clu{$i}};
+        if ($count == 1) {
+            print O "clu.$i\t1\t@{$clu{$i}}\t@{$clu{$i}}\n";
+        } else {
+            my $max = -10000;
+            my $rep = "";
+            for my $j (@{$clu{$i}}) {
+                if ($value{$j} >= $max) {
+                    $max = $value{$j};
+                    $rep = $j;
+                }
+            }
+            print O "clu.$i\t$count\t$rep\t".join(",", @{$clu{$i}})."\n";
+        }   
+    }
+}
+```
+
+## Python scripts
+
+```{python}
+#### parse_mpa4.py ####
+#!/data/software/miniconda3/envs/jinxin/bin/python
+# author: Jinxin Meng
+# created date: 2024-05-17, 22:16:50
+# modified date: 2025-09-13, 22:12:33
+
+# 20250913: add argument --use-gtdb-name for profile after taxa name conversion (sgb_to_gtdb_profile.py [metaphlan4])
+
+import sys, argparse, re
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('in_file', type=str, help='input mpa4 profile file')
+    parser.add_argument('out_prefix', type=str, help='out file prefix')
+    parser.add_argument('--level', metavar='', type=str, default='p,g,s', help='specify one or multiple (comma-delimited) taxonomic levels to output [default: p,g,s]')
+    parser.add_argument('--all-levels', action='store_true', help='output profiles for all taxonomic level [default: False]')
+    parser.add_argument('--long-names', action='store_true', help='output taxa names containing only the current level [default: False]')
+    parser.add_argument('--taxonomy-only', action='store_true', help='output only taxonomy hierarchy (no abundance data) [default: False]')
+    parser.add_argument('--split-taxonomy', action='store_true', help='split taxonomy information into separate columns [default: False]')
+    parser.add_argument('--add-header', action='store_true', help='add header to taxonomy file [default: False]')
+    parser.add_argument('--use-gtdb-name', action='store_true', help='mpa4 profile after replace sgb name by gtdb using sgb_to_gtdb_profile.py [default: False]')
+    parser.add_argument('--quiet', action='store_true', help='supressing messages [default: False]')
+    if len(sys.argv) == 1:
+        parser.print_help()
+        parser.exit()
+    args = parser.parse_args()
+    return args
+
+def get_taxonomy_levels(use_gtdb_name):
+    # 返回将分类编码映射到全名的字典
+    if use_gtdb_name:
+        taxa_codes = {'d': 'domain', 'p': 'phylum', 'c': 'class', 'o': 'order',
+                      'f': 'family', 'g': 'genus', 's': 'species'}
+    else:
+        taxa_codes = {'k': 'kingdom', 'p': 'phylum', 'c': 'class', 'o': 'order', 
+                      'f': 'family', 'g': 'genus', 's': 'species', 't': 'strain'}
+    return taxa_codes
+
+def identify_taxonomy_levels(taxonomy_list, use_gtdb_name):
+    taxonomy_levels = get_taxonomy_levels(use_gtdb_name)
+    combined_taxa = ','.join(taxonomy_list)
+    present_levels = []
+
+    for level_code in taxonomy_levels:
+        if re.search(f'{level_code}__', combined_taxa):
+            present_levels.append(level_code)
+
+    return [taxonomy_levels[level] for level in present_levels]
+
+def extract_taxonomy_data(in_file, out_prefix, split_taxonomy, add_header, use_gtdb_name, quiet):
+    # 提取分类法信息并将其写入文件
+    taxonomy_entries = []
+    with open(in_file, 'r') as f:
+        for line in f:
+            taxon = line.strip().split('\t')[0]
+            taxon = re.sub(' ', '_', taxon)
+            if re.search('name', taxon):
+                continue
+            taxonomy_entries.append(taxon)
+    
+    # 去重物种信息
+    combined_taxa = ','.join(taxonomy_entries)
+    unique_taxa = []
+    for taxon in taxonomy_entries:
+        if len(re.findall(re.escape(taxon), combined_taxa)) == 1:
+            unique_taxa.append(taxon)
+
+    # 输出信息
+    out_file = f'{out_prefix}.taxa.tsv'
+    with open(out_file, 'w') as f:
+        if split_taxonomy:
+            if add_header:
+                headers = identify_taxonomy_levels(unique_taxa, use_gtdb_name)
+                f.write('\t'.join(headers) + '\n')
+            sep = ';' if use_gtdb_name else '|'
+            for taxon in unique_taxa:
+                f.write('\t'.join(taxon.split(sep)) + '\n')
+        else:
+            for taxon in unique_taxa:
+                f.write(f'{taxon}\n')
+
+    if not quiet:
+        print(f'Taxonomy data written to {out_file}')
+
+def extract_level_profile(in_file, level_code, out_file, use_long_names, use_gtdb_name, quiet):
+    # 提取特定分类级别的profile数据
+    pattern = re.compile(f'({level_code}__\\w+(?!\\|))$') if use_gtdb_name else re.compile(f'({level_code}__\\w+(?!;))$')
+    out_f = open(out_file, 'w')
+    with open(in_file, 'r') as f:
+        header = f.readline()
+        out_f.write(header)
+
+        for line in f:
+            parts = line.strip().split('\t')
+            taxon_name = re.sub(' ', '_', parts[0])
+            abundance = '\t'.join([str(round(float(x), 5)) for x in parts[1:]])
+            if re.search(pattern, taxon_name):
+                if use_long_names:
+                    out_f.write(f'{taxon_name}\t{abundance}\n')
+                else:
+                    short_name = re.findall(pattern, taxon_name)[0]
+                    out_f.write(f'{short_name}\t{abundance}\n')
+    out_f.close()
+
+    if not quiet:
+        print(f"Profile for level '{level_code}' written to {out_file}")
+
+def auto_examine(in_file):
+    with open(in_file, 'r') as f:
+        for line in f:
+            name, *_ = line.strip().split('\t', 1)
+            if re.search(r';', name):
+                return True
+            if re.search(r'|', name):
+                return False
+
+def main():
+    args = parse_arguments()
+
+    if args.taxonomy_only:
+        extract_taxonomy_data(args.in_file, args.out_prefix, args.split_taxonomy, args.add_header, args.use_gtdb_name, args.quiet) 
+        return # 提前结束函数，不处理后续分类级别
+
+    taxonomy_levels = get_taxonomy_levels(args.use_gtdb_name)
+    levels_to_process = 'p,c,o,f,g,s' if args.all_levels else args.level
+    
+    for level_code in levels_to_process.split(','):
+        if level_code not in taxonomy_levels:
+            sys.exit(f"Error: Invalid taxonomic level '{level_code}'. Valid levels are: {', '.join(taxonomy_levels.keys())}")
+        out_file = f'{args.out_prefix}.{level_code}.tsv'
+        extract_level_profile(args.in_file, level_code, out_file, args.long_names, args.use_gtdb_name, args.quiet)
+
+if __name__ == '__main__':
+    main()
+```
+
+
+## metagenomics downstream analysis 
+
+```{R}
+#### info ####
+grp <- c('Mock','PDCoV')
+grp_col <- structure(c('#a0a0a4','#d7b0b0'), names = grp)
+
+group <- read.delim("../data/group_rename3.tsv") %>% 
+  select(sample, group)
+
+cvg <- read.delim("../rawdata/species.cvg", row.names = 1, check.names = F) %>% 
+  apply(2, \(x) ifelse(x < .1, 0, 1))
+profile <- cvg * read.delim("../rawdata/species.tpm", row.names = 1, check.names = F)
+profile <- apply(profile, 2, \(x) x/sum(x) * 100) %>% 
+  data.frame() %>% 
+  select(all_of(group$sample))
+
+taxa <- read.delim("../data/gtdbtk.tsv")
+
+tr <- treeio::read.tree('../rawdata/faa_species.tre')
+
+data <- taxa_trans(profile, taxa, to = 'species', out_all = T) %>%
+  rownames_to_column('name')
+write.xlsx(data, '../data/species.xlsx')
+write.table(data, '../data/species.tsv', sep = '\t', quote = F, row.names = F)
+
+#### alpha ####
+source("/code/R_func/diversity.R") 
+
+map(c('pd', 'shannon', 'richness', 'ace'), ~
+  calcu_alpha(profile, method = .x, tree = tr) %>% 
+    left_join(group, by = "sample") %>% 
+    mutate(group = factor(group, grp)) %>% 
+    ggboxplot("group", "value", fill = "group", palette = grp_col, 
+            legend = "none", outlier.size = 1, xlab = "", 
+            ylab = paste0(.x, ' index')) +
+    stat_compare_means(comparisons = list(grp), label = "p.signif", 
+                       step.increase = .06, vjust = .7, tip.length = .02) +
+    theme(aspect.ratio = 2) ) %>% 
+  cowplot::plot_grid(plotlist = ., nrow = 1, align = 'v')
+ggsave("taxa.div.alpha.pdf", width = 8, height = 3)
+
+#### PCoA ####
+source("/code/R_func/plot_PCoA.R")
+
+plot_PCoA(profile, group, group_order = grp, group_color = grp_col, 
+          add_group_label = T, lab_size = 3, ellipse_level = .8, 
+          show_legend = F, show_grid = T, show_line = F)
+ggsave("taxa.div.PCoA.pdf", width = 4, height = 3)
+
+#### compos ####
+source("F:/code/R_func/taxa.R")
+
+colors <- c("#8dd3c7","#ffffb3","#80b1d3","#b3de69","#fdb462","#bc80bd","#fb8072",
+            "#ffed6f","#fccde5","#bebada","#e5c494","#ccebc5","#d9d9d9")
+
+# composition
+map(c('phylum', 'family', 'genus', 'species'), ~ {
+  .data <- taxa_trans(profile, taxa, group, to = .x, top_n = 12,
+                      other_name = paste0(str_sub(.x, 1, 1), '__Other')) %>% 
+    filter(!grepl('Unknown', rownames(.)))
+  plot_compos_manual(.data, group, taxa_color = colors, group_order = grp, 
+                     plot_title = str_to_sentence(paste0(.x, ' level')),
+                     out_all = T) +
+    theme(aspect.ratio = 2.4) }) %>% 
+  cowplot::plot_grid(plotlist = ., nrow = 2, align = 'v')
+ggsave(file = "taxa.compos.rela_ab.pdf", width = 10, height = 8)
+    
+# abundance
+data <- map(c('phylum', 'family', 'genus', 'species'), ~ {
+  .data <- taxa_trans(profile, taxa, group, to = .x, out_all = T, transRA = T) 
+  .ab <- .data %>% 
+    profile_smp2grp(group) %>% 
+    rownames_to_column('name') 
+  .diff <- .data %>% 
+    rownames_to_column('name') %>% 
+    gather('sample', 'value', -name) %>% 
+    left_join(group, by = 'sample') %>% 
+    group_by(name) %>% 
+    wilcox_test(value ~ group, comparisons = grp, detailed = T) %>% 
+    select(-.y., -n1, -n2, -statistic) %>% 
+    mutate(enriched = ifelse(p < 0.05 & estimate > 0, 'Mock', 
+                             ifelse(p < 0.05 & estimate < 0, 'PDCoV', 'none')))
+  left_join(.ab, .diff, by = 'name')  } ) %>% 
+  set_names(c('phylum', 'family', 'genus', 'species'))
+write.xlsx(data, 'taxa.compos.rela_ab.diff.xlsx')
+
+
+# phylum
+data <- taxa_trans(profile, taxa, group, to = 'phylum', out_all = T)
+plot_taxa_boxplot(data, group, group_order = grp, group_color = grp_col, 
+                  show_legend = F, legend_title = '', aspect_ratio = 2) %>% 
+  cowplot::plot_grid(plotlist = ., nrow = 3, align = 'v')
+ggsave("taxa.compos.p.diff.pdf", width = 7, height = 9)
+
+# family
+data <- taxa_trans(profile, taxa, group, to = 'family', out_all = T)
+plot_taxa_boxplot(data, group, group_order = grp, group_color = grp_col, 
+                  show_legend = F, legend_title = '', aspect_ratio = 2) %>% 
+  cowplot::plot_grid(plotlist = ., nrow = 7, align = 'v')
+ggsave("taxa.compos.f.diff.pdf", width = 13, height = 21)
+
+# genus
+data <- taxa_trans(profile, taxa, group, to = 'genus', out_all = T)
+plot_taxa_boxplot(data, group, group_order = grp, group_color = grp_col, 
+                  show_legend = F, legend_title = '', aspect_ratio = 2) %>% 
+  cowplot::plot_grid(plotlist = ., nrow = 10, align = 'v')
+ggsave("taxa.compos.g.diff.pdf", width = 18, height = 30)
+
+diff <- difference_analysis(data, group, comparison = c('PDCoV', 'Mock'), add_enriched = T)
+write.xlsx(diff, 'taxa.compos.g.diff.xlsx')
+
+plot_data <- diff %>% 
+  mutate(.pval = -log10(pval),
+         .PDCoV_ab = log(PDCoV_ab + 0.01),
+         .Mock_ab = log(Mock_ab + 0.01),
+         .label = ifelse(abs(log2FC) > 5 & pval < 0.03, name, ''))
+
+ggscatter(plot_data, '.PDCoV_ab', '.Mock_ab', color = 'enriched', size = 'enriched',
+            xlab = 'Log10 relative abundance in PDCoV',
+            ylab = 'Log10 relative abundance in Mock',
+            palette = c(grp_col, 'none' = 'grey88')) + 
+  geom_abline(slope = 1, intercept = 0, linetype = 'longdash') +
+  scale_size_manual(values = c(2, 1.8, 2)) +
+  geom_text(aes(label = .label), size = 1) +
+  # ggrepel::geom_text_repel(aes(label = .label)) +
+  theme(aspect.ratio = 1)
+ggsave('taxa.compos.g.diff.v2.1.pdf', width = 5, height = 6)
+
+#### lefse ####
+library(microeco)
+library(magrittr)
+
+set.seed(2025)
+
+group <- read.delim("../data/group_rename3.tsv") %>% 
+  column_to_rownames('sample') %>% 
+  mutate(group = factor(group))
+
+data <- profile
+
+tax <- read.delim("../data/gtdbtk.tsv", row.names = 1) %>% 
+  tidy_taxonomy() %>% 
+  rename_all(~ str_to_title(.x))
+
+tr <- treeio::read.tree('../rawdata/faa_species.tre') # 有根树
+
+dataset <- microtable$new(sample_table = group, otu_table = data, 
+                          tax_table = tax, phylo_tree = tr)
+
+trans_abund$new(dataset)
+
+lefse <- trans_diff$new(dataset = dataset, method = 'lefse', group = 'group')
+
+lefse$plot_diff_bar(use_number = 1:30, width = 0.6, group_order = grp, 
+                    color_values = grp_col) + 
+  theme_pubr()
+ggsave('taxa.lefse.barplot.pdf', width = 5, height = 6)
+
+lefse$plot_diff_cladogram(group_order = grp, use_feature_num = 50,
+                          use_taxa_num = 200, clade_label_level = 10,
+                          color = grp_col)
+ggsave('taxa.lefse.cladogram.pdf', width = 15, height = 8)
+
+write.xlsx(lefse$res_diff, 'taxa.lefse.result.xlsx')
+
+#### massalin2 ####
+library(Maaslin2)
+
+data <- taxa_trans(profile, taxa, to = 'species', out_all = T, transRA = T)
+
+group <- read.delim('../data/group_rename3.tsv') %>% 
+  column_to_rownames('sample')
+
+Maaslin2(data, group, output = 'taxa.masslin2.species', analysis_method = "LM",
+         normalization = 'NONE', transform = 'LOG', correction = 'bonferroni', 
+         fixed_effects = c('group'), save_models = T, save_scatter = T)
+
+maaslin2_out <- read.delim('taxa.masslin2.species/all_results.tsv') %>% 
+  mutate(feature = gsub('\\.', ' ', feature),
+         feature = gsub('CAG ', 'CAG-', feature)) %>% 
+  filter(pval < 0.05) %>% 
+  mutate(enriched = ifelse(coef > 0, 'PDCoV', 'Mock'))
+
+# 系数
+coef_data <- maaslin2_out %>% 
+  select(feature, coef, enriched) %>%
+  mutate(coef = abs(coef),
+         feature = sub('CAG ', 'CAG-', feature)) %>% 
+  arrange(coef) %>% 
+  group_by(enriched) %>% 
+  slice_tail(n = 10) %>% 
+  ungroup() %>% 
+  arrange(desc(enriched))
+  
+ggbarplot(coef_data, 'feature', 'coef', fill = 'enriched', rotate = T, 
+          ylab = 'Coefficient', xlab = '', palette = grp_col) + 
+  theme(aspect.ratio = 2)
+ggsave('maaslin2.coef.pdf', width = 6, height = 6)
+
+# 热图
+library(ComplexHeatmap)
+plot_data <- data[rev(coef_data$feature),] %>% 
+  profile_transRA()
+
+row_data <- data.frame(feature = rownames(plot_data)) %>% 
+  left_join(select(maaslin2_out, feature, enriched), by = 'feature')
+
+col_data <- data.frame(sample = colnames(profile)) %>% 
+  left_join(read.delim('../data/group_rename3.tsv'), 'sample') %>% 
+  select(sample, group)
+
+row_annotation <- row_data %>% 
+  column_to_rownames('feature')
+
+annotation_colors <- list(enriched = grp_col)
+
+col_split <- factor(col_data$group)
+
+pdf('maaslin2.heatmap.pdf', width = 7, height = 5)
+pheatmap(plot_data, scale = 'row',
+         color = colorRampPalette(c("#4575b4", "#f7f7f7", "#d73027"))(100),
+         border = "#ffffff", border_gp = gpar(col = "#000000"),
+         show_rownames = T, show_colnames = T,
+         cellwidth = 12, cellheight = 12,
+         column_split = col_split, 
+         annotation_row = row_annotation,
+         annotation_colors = annotation_colors,
+         cluster_rows = F,
+         show_row_dend = F, show_column_dend = F,
+         fontsize_col = 10, fontsize_row = 10)
+dev.off()
+
+#### KO info ####
+
+grp <- c('Mock','PDCoV')
+grp_col <- structure(c('#a0a0a4','#d7b0b0'), names = grp)
+
+group <- read.delim("../data/group_rename3.tsv") %>% 
+  select(sample, group)
+
+ko_info <- read.delim('../data/KO_level_A_B_C_D_Description', quote = "")
+ko_tpm <- read.delim('../rawdata/diamond.ko.tpm', row.names = 1) %>% 
+  select(all_of(group$sample)) %>% 
+  filter(rowSums(.) != 0)
+
+#### KO sunburst ####
+ko_info <- read.delim("/database/KEGG/v20230401/KO_level_A_B_C_D_Description", 
+                      sep = "\t", quote = "") 
+
+data <- ko_info %>% 
+  filter(lvD %in% rownames(ko_tpm)) %>% 
+  select(-lvD, -lvDdes) %>% 
+  filter(lvAdes != 'Human Diseases') %>% 
+  group_by(lvA, lvAdes, lvB, lvBdes, lvC, lvCdes) %>% 
+  summarise(n = n()) %>% 
+  ungroup()
+
+# 旭日图
+levels <- c("lvA", "lvB", "lvC")
+colors <- c('#8dd3c7','#fb8072','#bebada','#80b1d3','#fdb462',
+            '#b3de69','#fccde5')
+
+plot_data <- data %>%
+  mutate(lvA = lvAdes,
+         lvB = lvBdes,
+         lvC = lvCdes) %>% 
+  select(lvA, lvB, lvC, n) %>% 
+  group_by(lvA, lvB, lvC) %>% 
+  arrange(lvA, lvB, lvC, desc(n)) %>% 
+  mutate(lvA = paste0("A ", lvA),
+         lvB = paste0("B ", lvB),
+         lvC = paste0("C ", lvC))
+
+plot_colors <- plot_data$lvA %>% 
+  table(lvA = .) %>% 
+  data.frame %>% 
+  arrange(desc(Freq)) %>% 
+  add_column(color = colors)
+
+plot_colors <- plot_data %>% 
+  left_join(select(plot_colors, lvA, color), by = "lvA") %>% 
+  gather(key = "level", value = "name", -n, -color) %>% 
+  select(name, color) %>% 
+  unique() %>% 
+  pull(name = name)
+
+plot_data %>% 
+  gather(key = "level", value = "name", -n) %>%
+  mutate(level = factor(level, unique(level)),
+         name = factor(name, unique(name))) %>% 
+  arrange(level, name) %>%
+  group_by(level, name) %>%
+  summarise(n = sum(n)) %>%
+  ungroup() %>%
+  group_by(level) %>%
+  mutate(ymax = cumsum(n),
+         ymin = lag(ymax, default = 0),
+         xmax = as.numeric(level),
+         xmin = xmax - 1,
+         xpos = (xmax + xmin)/2, 
+         ypos = (ymax + ymin)/2,
+         prec = ypos / sum(plot_data$n),
+         angle = -prec * 360,
+         angle = ifelse(angle < 0 & angle > -180, angle + 90, angle - 90),
+         label = ifelse(n > 200, gsub("\\w__", "", name), ""),
+         label = gsub("[ABC] ", "", label)) %>% 
+  ggplot() +
+  geom_rect(aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = name),
+            color = "white", linewidth = .1) +
+  geom_text(aes(x = xpos, y = ypos, label = label, angle = angle), size = 2.2) +
+  scale_fill_manual(values = plot_colors) +
+  labs(caption = "A total of 7,004 KOs") +
+  coord_polar(theta = "y") +
+  theme_void() +
+  theme(legend.position = "none") 
+ggsave('KO.annotation.pdf', width = 9, height = 9)
+
+#### KO alpha ####
+source("/code/R_func/diversity.R") 
+
+map(c('shannon', 'richness'), ~
+      calcu_alpha(ko_tpm, method = .x) %>% 
+      left_join(group, by = "sample") %>% 
+      mutate(group = factor(group, grp)) %>% 
+      ggboxplot("group", "value", fill = "group", palette = grp_col, 
+                legend = "none", outlier.size = 1, xlab = "", 
+                ylab = paste0(.x, ' index')) +
+      stat_compare_means(comparisons = list(grp), label = "p.signif", 
+                         step.increase = .06, vjust = .7, tip.length = .02) +
+      theme(aspect.ratio = 2) ) %>% 
+  cowplot::plot_grid(plotlist = ., nrow = 1, align = 'v')
+ggsave("KO.div.alpha.pdf", width = 4, height = 3)
+
+#### KO PCoA ####
+source("/code/R_func/plot_PCoA.R")
+
+plot_PCoA(ko_tpm, group, group_order = grp, group_color = grp_col, 
+          add_group_label = T, lab_size = 3, ellipse_level = .9, 
+          show_legend = F, show_grid = T, show_line = F)
+ggsave("KO.div.PCoA.pdf", width = 4, height = 3)
+
+#### KO_lvA compos ####
+source('/code/R_func/calcu_stamp.R')
+
+path_tpm <- ko_tpm %>% 
+  mutate(lvAdes = ko_info$lvAdes[match(rownames(.), ko_info$lvD)]) %>% 
+  aggregate(. ~ lvAdes, ., sum) %>% 
+  column_to_rownames('lvAdes')
+
+diff <- difference_analysis(path_tpm, group, add_enriched = T,
+                            comparison = c('PDCoV', 'Mock') )
+
+write.xlsx(diff, 'KO_lvA.rela_ab.diff.xlsx')
+
+colors <- c("#4E79A7","#A0CBE8","#F28E2B","#FFBE7D","#59A14F","#8CD17D",
+            "#B6992D","#F1CE63","#499894","#86BCB6")
+
+.names <- diff %>% 
+  filter(name != "Human Diseases") %>% 
+  pull(name)
+
+data <- filter(path_tpm, rownames(path_tpm) %in% .names)
+
+plot_compos_manual(data, group, taxa_color = colors, group_order = grp,
+                   plot_title = 'KO level_A function') +
+  theme(aspect.ratio = 2.4)
+
+ggsave("KO_lvA.compos.pdf", width = 6, height = 4)
+
+calcu_stamp(data, group, comparison = c('PDCoV', 'Mock'), method = 'wilcox') %>% 
+  filter(pval < 0.05) %>% 
+  plot_stamp(top_n = 10, comparison = c('PDCoV', 'Mock'), 
+             palette = c('#d7b0b0', '#a0a0a4'), left_title = '', 
+             left_xlab = 'mean TPM of features', middle_title = '', 
+             middle_xlab = '95% confidence intervals\nestimate of the location parameter')
+ggsave(file = "KO_lvA.rela_ab.diff.pdf", width = 10, height = 5)
+
+#### KO_lvB compos ####
+source('/code/R_func/calcu_stamp.R')
+
+path_tpm <- ko_tpm %>% 
+  mutate(lvBdes = ko_info$lvBdes[match(rownames(.), ko_info$lvD)]) %>% 
+  aggregate(. ~ lvBdes, ., sum) %>% 
+  column_to_rownames('lvBdes')
+
+diff <- difference_analysis(path_tpm, group, add_enriched = T,
+                            comparison = c('PDCoV', 'Mock')) %>% 
+  mutate(category = ko_info$lvAdes[match(name, ko_info$lvBdes)], .after = 1)
+
+write.xlsx(diff, 'KO_lvB.rela_ab.diff.xlsx')
+
+# heatmap
+row_data <- data.frame(name = rownames(path_tpm)) %>% 
+  mutate(lvAdes = ko_info$lvAdes[match(name, ko_info$lvBdes)]) %>% 
+  filter(lvAdes %in% c("Metabolism","Environmental Information Processing",
+                       "Cellular Processes", "Genetic Information Processing",
+                       'Organismal Systems','Brite Hierarchies'))
+col_data <- data.frame(name = colnames(path_tpm)) %>% 
+  left_join(group, by = c('name' = 'sample'))
+
+row_annotation <- row_data %>% column_to_rownames('name')
+col_annotation <- col_data %>% column_to_rownames('name')
+
+colors <- list(lvAdes = structure(c('#a6cee2','#b1df89','#fa9a99','#c9b1d5',
+                                    '#fcc681','#fccde5'),
+                                  names = unique(row_data$lvAdes)),
+               group = grp_col)
+
+row_split <- factor(row_annotation$lvAdes)
+col_split <- factor(col_annotation$group)
+
+data <- filter(path_tpm, rownames(path_tpm) %in% row_data$name)
+
+pdf('KO_lvB.rela_ab.heatmap.pdf', width = 10, height = 6)
+pheatmap(data, scale = "row",
+         color = paletteer::paletteer_c("grDevices::Temps", 30),
+         split = row_split, column_split = col_split,
+         column_gap = unit(1, "mm"), row_gap = unit(1, "mm"),
+         cluster_rows = T, cluster_cols = T,
+         border_color = 'white', border_gp = gpar(col = "black"),
+         show_rownames = T, show_colnames = F,
+         cellwidth = 12, cellheight = 8,
+         treeheight_col = 30, treeheight_row = 30,
+         fontsize_col = 8,  fontsize_row = 7,
+         annotation_col = col_annotation, annotation_row = row_annotation,
+         annotation_colors = colors, annotation_names_col = T )
+dev.off()
+
+# composition
+colors <- c("#4E79A7","#A0CBE8","#F28E2B","#FFBE7D","#59A14F","#8CD17D",
+            "#B6992D","#F1CE63","#499894","#86BCB6","#E15759","#FF9D9A","#79706E")
+
+# metabolism
+.names <- filter(diff, category == "Metabolism") %>% pull(name)
+
+data <- filter(path_tpm, rownames(path_tpm) %in% .names)
+
+plot_compos_manual(data, group, taxa_color = colors, group_order = grp,
+                   plot_title = 'Metabolism') +
+  theme(aspect.ratio = 2.4)
+ggsave("KO_lvB.compos.metabolism.pdf", width = 6, height = 4)
+
+# Environmental
+.names <- filter(diff, category == "Environmental Information Processing") %>% 
+  pull(name)
+
+data <- filter(path_tpm, rownames(path_tpm) %in% .names)
+
+plot_compos_manual(data, group, taxa_color = colors, group_order = grp,
+                   plot_title = 'Environmental') +
+  theme(aspect.ratio = 2.4)
+ggsave('KO_lvB.compos.Environmental.pdf', width = 6, height = 4)
+
+# Genetic Information Processing
+.names <- filter(diff, category == "Genetic Information Processing") %>% 
+  pull(name)
+
+data <- filter(path_tpm, rownames(path_tpm) %in% .names)
+
+plot_compos_manual(data, group, taxa_color = colors, group_order = grp,
+                   plot_title = 'Genetic') +
+  theme(aspect.ratio = 2.4)
+ggsave("KO_lvB.compos.Genetic.pdf", width = 6, height = 4)
+
+# Cellular Processes
+.names <- filter(diff, category == "Cellular Processes") %>% 
+  pull(name)
+
+data <- filter(path_tpm, rownames(path_tpm) %in% .names)
+
+plot_compos_manual(data, group, taxa_color = colors, group_order = grp,
+                   plot_title = 'Cellular') +
+  theme(aspect.ratio = 2.4)
+ggsave('KO_lvB.compos.Cellular.pdf', width = 6, height = 4)
+
+# combine
+.names <- diff %>% 
+  filter(pval < 0.05) %>% 
+  filter(category %in% c('Cellular Processes','Metabolism',
+                         'Environmental Information Processing',
+                         'Genetic Information Processing')) %>% 
+  pull(name)
+
+data <- ko_tpm %>% 
+  mutate(lvBdes = ko_info$lvBdes[match(rownames(.), ko_info$lvD)]) %>% 
+  aggregate(. ~ lvBdes, ., sum) %>% 
+  column_to_rownames('lvBdes') %>% 
+  filter(rownames(.) %in% .names)
+
+calcu_stamp(data, group, comparison = c('PDCoV', 'Mock'), method = 'wilcox') %>% 
+  filter(pval < 0.05) %>% 
+  plot_stamp(top_n = 100, comparison = c('PDCoV', 'Mock'), 
+             palette = c('#d7b0b0', '#a0a0a4'), left_title = '', 
+             left_xlab = 'mean TPM', middle_title = '', 
+             middle_xlab = '95% confidence intervals\nestimate of the location parameter')
+ggsave('KO_lvB.rela_ab.diff.pdf', width = 10, height = 8)
+
+#### KO_lvC compos ####
+path_tpm <- ko_tpm %>% 
+  mutate(lvCdes = ko_info$lvCdes[match(rownames(.), ko_info$lvD)]) %>% 
+  aggregate(. ~ lvCdes, ., sum) %>% 
+  column_to_rownames('lvCdes')
+
+diff <- difference_analysis(path_tpm, group, method = 'wilcox', 
+                            comparison = c('PDCoV', 'Mock'), add_enriched = T)
+write.xlsx(diff, 'KO_lvC.rela_ab.diff.xlsx')
+
+#### KO_lvC massalin2 ####
+library(Maaslin2)
+
+group <- read.delim('../data/group_rename3.tsv') %>% 
+  column_to_rownames('sample')
+
+path_tpm <- ko_tpm %>% 
+  mutate(lvCdes = ko_info$lvCdes[match(rownames(.), ko_info$lvD)]) %>% 
+  aggregate(. ~ lvCdes, ., sum) %>% 
+  column_to_rownames('lvCdes')
+
+# 随机效应模型是不同猪
+Maaslin2(path_tpm, group, output = 'KO_lvC.masslin2', analysis_method = "LM",
+         normalization = 'NONE', transform = 'LOG', correction = 'bonferroni', 
+         fixed_effects = c('group'), save_models = T, save_scatter = T)
+
+maaslin2_out <- read.delim('KO_lvC.masslin2/all_results.tsv') 
+
+#### KO diff ####
+group <- read.delim('../data/group_rename3.tsv') 
+
+diff <- difference_analysis(ko_tpm, group, comparison = c('PDCoV', 'Mock'), 
+                            add_enriched = T)
+
+write.xlsx(diff, 'KO.rela_ab.diff.xlsx')
+
+#### KO ORA ####
+lib <- select(ko_info, term = lvCdes, gene = lvD)
+
+ePath <- filter(diff, enriched != 'none') %>% 
+  pull(name) %>% 
+  enricher(TERM2GENE = lib, pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+  data.frame()
+write.xlsx(ePath, 'KO.ePath.xlsx')
+
+#### BSH BaiCD ####
+group <- read.delim('../data/group_rename3.tsv')
+
+ko_tpm[c('K01442', 'K15870'),] %>% 
+  t %>% 
+  data.frame() %>% 
+  rownames_to_column('sample') %>% 
+  left_join(group, by = 'sample') %>% 
+  select(-sample, -individual) %>% 
+  filter(!is.na(group)) %>% 
+  gather('gene', 'value', -group) %>% 
+  ggboxplot('group', 'value', fill = 'group', palette = group_color, legend = 'none') +
+  facet_wrap(~ gene, scale = 'free') +
+  stat_compare_means(comparisons = list(grp), method = 'wilcox', 
+                     label = 'p.signif') +
+  theme(aspect.ratio = 1.8,
+        strip.background = element_blank())
+ggsave('ko.BSH.boxplot.pdf', width = 4, height = 3)
+
+ko_tpm[c('K01442', 'K15870'),] %>% 
+  t %>% 
+  data.frame() %>% 
+  rownames_to_column('sample') %>% 
+  left_join(group, by = 'sample') %>% 
+  filter(!is.na(group)) %>% 
+  select(-sample) %>% 
+  gather('gene', 'value', -group) %>% 
+  group_by(gene) %>% 
+  wilcox_test(value ~ group)
+
+#### correlation ####
+# virus_load / fecal virus_load
+metadata <- cbind(
+  read.delim('../data/metadata_virus_load.tsv') %>% 
+    filter(group %in% c('Mock', 'PDCoV')) %>% 
+    group_by(group) %>% 
+    slice_head(n = 6) %>% 
+    ungroup() %>% 
+    select(-group, -type), 
+  read.delim('../data/metadata_fecal_virus_load.tsv') %>% 
+    filter(group %in% c('Mock', 'PDCoV')) %>% 
+    group_by(group) %>% 
+    slice_head(n = 6) %>% 
+    ungroup() %>% 
+    select(feces = D3))
+
+group <- read.delim("../data/group_rename3.tsv")
+
+cvg <- read.delim("../rawdata/species.cvg", row.names = 1, check.names = F) %>% 
+  apply(2, \(x) ifelse(x < .1, 0, 1))
+
+profile <- cvg * read.delim("../rawdata/species.tpm", row.names = 1, check.names = F)
+
+profile <- apply(profile, 2, \(x) x/sum(x) * 100) %>% 
+  data.frame() %>% 
+  select(all_of(group$sample))
+
+taxa <- read.delim("../data/gtdbtk.tsv")
+
+.names <- read.delim('taxa.masslin2.species/all_results.tsv') %>% 
+  filter(pval < 0.05) %>% 
+  mutate(enriched = ifelse(coef > 0, 'PDCoV', 'Mock'),
+         feature = gsub('\\.', ' ', feature),
+         feature = gsub('CAG ', 'CAG-', feature),
+         coef = abs(coef)) %>% 
+  arrange(coef) %>% 
+  group_by(enriched) %>% 
+  slice_tail(n = 10) %>% 
+  ungroup %>% 
+  pull(feature)
+
+data <- taxa_trans(profile, taxa, to = 'species', out_all = T) %>% 
+  filter(rownames(.) %in% .names)
+
+corr <- psych::corr.test(t(data), metadata)
+r_data <- data.frame(t(corr$r), check.names = F)
+p_data <- data.frame(t(corr$p), check.names = F)
+
+r_data[abs(r_data) < 0.1] <- 0
+p_data[p_data >= 0.05] <- -1
+p_data[p_data < 0.05 & p_data >= 0] <- 1
+p_data[p_data == -1] <- 0
+cor_out <- r_data * p_data
+cor_out <- cor_out[apply(cor_out, 1, \(x) sum(x != 0) >= 1), 
+                   apply(cor_out, 2, \(x) sum(x != 0) >= 1)]
+
+plot_data <- data.frame(t(corr$r), check.names = F)[rownames(cor_out), colnames(cor_out)]
+
+plot_label <- data.frame(t(corr$p), check.names = F)[rownames(cor_out), colnames(cor_out)] %>%
+  apply(2, \(x) ifelse(x < 0.001, "+", ifelse(x < 0.01, "**", ifelse(x < 0.05, "*", ""))))
+
+pdf('cor_spearman.pdf', width = 5, height = 5)
+pheatmap(t(plot_data),
+         cluster_rows = T, cluster_cols = T,
+         border = "#ffffff", border_gp = gpar(col = "#000000"),
+         show_rownames = T, show_colnames = T,
+         cellwidth = 10,cellheight = 10,
+         treeheight_col = 0, treeheight_row = 0,
+         fontsize_col = 8, fontsize_row = 8,
+         display_numbers = t(plot_label),
+         fontface_col = "italic", angle_col = "45")
+dev.off()
+
+r_data <- data.frame(t(corr$r), check.names = F) %>% 
+  rownames_to_column('name') %>% 
+  gather('taxa', 'rval', -name)
+p_data <- data.frame(t(corr$p), check.names = F) %>% 
+  rownames_to_column('name') %>% 
+  gather('taxa', 'pval', -name) %>% 
+  mutate(padj = p.adjust(pval, 'BH'))
+
+plot_data <- cbind(r_data, select(p_data, pval, padj))
+write.xlsx(plot_data, 'cor_spearman.xlsx')
+
+# graph
+edges <- plot_data %>% 
+  filter(padj < 0.05) %>% 
+  select(from = name, to = taxa, rval) %>% 
+  mutate(direct = ifelse(rval < 0, 'neg', 'pos'),
+         rval = abs(rval))
+nodes <- data.frame(node = unique(c(edges$from, edges$to))) %>% 
+  mutate(type = ifelse(grepl('s__', node), 'taxa', 'virus'),
+         phylum = ifelse(type == 'taxa', taxa$phylum[match(node, taxa$species)], ''))
+
+g <- tbl_graph(nodes = nodes, edges = edges)
+
+colors <- c("#8dd3c7","#bebada","#fb8072","#80b1d3","#fdb462",
+            "#b3de69","#fccde5","#bc80bd","#ffed6f","grey77")
+
+ggraph(g, layout = 'linear', circular = T) +
+  geom_edge_arc(aes(edge_width = rval, edge_linetype = direct, 
+                    edge_colour = direct), strength = .2) +
+  scale_edge_linetype_manual(values = c(2, 1)) +
+  scale_edge_width(range = c(.5, .8)) +
+  scale_edge_color_manual(values = c("#7fc97f","#fdc086")) +
+  geom_node_point(aes(color = phylum, shape = type), size = 3) +
+  scale_shape_manual(values = c(16, 15)) +
+  scale_color_manual(values = colors) +
+  geom_node_text(aes(label = node), size = 2) +
+  theme_void() +
+  theme(aspect.ratio = 1)
+ggsave('cor_network.pdf', width = 5, height = 4)
+
+#### correlation 20250415 ####
+# virus_load / fecal virus_load
+metadata <- cbind(
+  read.delim('../data/metadata_virus_load.tsv') %>% 
+    filter(group %in% c('Mock', 'PDCoV')) %>% 
+    group_by(group) %>% 
+    slice_tail(n = 6) %>% 
+    ungroup() %>% 
+    select(-group, -type), 
+  read.delim('../data/metadata_fecal_virus_load.tsv') %>% 
+    filter(group %in% c('Mock', 'PDCoV')) %>% 
+    group_by(group) %>% 
+    slice_tail(n = 6) %>% 
+    ungroup() %>% 
+    select(feces = D3))
+
+group <- read.delim("../data/group_rename3.tsv")
+
+cvg <- read.delim("../rawdata/species.cvg", row.names = 1, check.names = F) %>% 
+  apply(2, \(x) ifelse(x < .1, 0, 1))
+
+profile <- cvg * read.delim("../rawdata/species.tpm", row.names = 1, check.names = F)
+
+profile <- apply(profile, 2, \(x) x/sum(x) * 100) %>% 
+  data.frame() %>% 
+  select(all_of(group$sample))
+
+taxa <- read.delim("../data/gtdbtk.tsv")
+
+.names <- read.delim('taxa.masslin2.species/all_results.tsv') %>% 
+  filter(pval < 0.05) %>% 
+  mutate(enriched = ifelse(coef > 0, 'PDCoV', 'Mock'),
+         feature = gsub('\\.', ' ', feature),
+         feature = gsub('CAG ', 'CAG-', feature),
+         coef = abs(coef)) %>% 
+  arrange(coef) %>% 
+  group_by(enriched) %>% 
+  slice_tail(n = 10) %>% 
+  ungroup %>% 
+  pull(feature)
+
+data <- taxa_trans(profile, taxa, to = 'species', out_all = T) %>% 
+  filter(rownames(.) %in% .names)
+
+corr <- psych::corr.test(t(data), metadata)
+r_data <- data.frame(t(corr$r), check.names = F)
+p_data <- data.frame(t(corr$p), check.names = F)
+
+r_data[abs(r_data) < 0.1] <- 0
+p_data[p_data >= 0.05] <- -1
+p_data[p_data < 0.05 & p_data >= 0] <- 1
+p_data[p_data == -1] <- 0
+cor_out <- r_data * p_data
+cor_out <- cor_out[apply(cor_out, 1, \(x) sum(x != 0) >= 1), 
+                   apply(cor_out, 2, \(x) sum(x != 0) >= 1)]
+
+plot_data <- data.frame(t(corr$r), check.names = F)[rownames(cor_out), colnames(cor_out)]
+
+plot_label <- data.frame(t(corr$p), check.names = F)[rownames(cor_out), colnames(cor_out)] %>%
+  apply(2, \(x) ifelse(x < 0.001, "+", ifelse(x < 0.01, "**", ifelse(x < 0.05, "*", ""))))
+
+pdf('cor_spearman.pdf', width = 5, height = 5)
+pheatmap(t(plot_data),
+         cluster_rows = T, cluster_cols = T,
+         border = "#ffffff", border_gp = gpar(col = "#000000"),
+         show_rownames = T, show_colnames = T,
+         cellwidth = 10,cellheight = 10,
+         treeheight_col = 0, treeheight_row = 0,
+         fontsize_col = 8, fontsize_row = 8,
+         display_numbers = t(plot_label),
+         fontface_col = "italic", angle_col = "45")
+dev.off()
+
+r_data <- data.frame(t(corr$r), check.names = F) %>% 
+  rownames_to_column('name') %>% 
+  gather('taxa', 'rval', -name)
+p_data <- data.frame(t(corr$p), check.names = F) %>% 
+  rownames_to_column('name') %>% 
+  gather('taxa', 'pval', -name) %>% 
+  mutate(padj = p.adjust(pval, 'BH'))
+
+plot_data <- cbind(r_data, select(p_data, pval, padj))
+write.xlsx(plot_data, 'cor_spearman.xlsx')
+
+# graph
+edges <- plot_data %>% 
+  filter(padj < 0.05) %>% 
+  select(from = name, to = taxa, rval) %>% 
+  mutate(direct = ifelse(rval < 0, 'neg', 'pos'),
+         rval = abs(rval))
+nodes <- data.frame(node = unique(c(edges$from, edges$to))) %>% 
+  mutate(type = ifelse(grepl('s__', node), 'taxa', 'virus'),
+         phylum = ifelse(type == 'taxa', taxa$phylum[match(node, taxa$species)], ''))
+
+g <- tbl_graph(nodes = nodes, edges = edges)
+
+colors <- c("#8dd3c7","#bebada","#fb8072","#80b1d3","#fdb462",
+            "#b3de69","#fccde5","#bc80bd","#ffed6f","grey77")
+
+ggraph(g, layout = 'linear', circular = T) +
+  geom_edge_arc(aes(edge_width = rval, edge_linetype = direct, 
+                    edge_colour = direct), strength = .2) +
+  scale_edge_linetype_manual(values = c(2, 1)) +
+  scale_edge_width(range = c(.5, .8)) +
+  scale_edge_color_manual(values = c("#7fc97f","#fdc086")) +
+  geom_node_point(aes(color = phylum, shape = type), size = 3) +
+  scale_shape_manual(values = c(16, 15)) +
+  scale_color_manual(values = colors) +
+  geom_node_text(aes(label = node), size = 2) +
+  theme_void() +
+  theme(aspect.ratio = 1)
+ggsave('cor_network.pdf', width = 5, height = 4)
+```

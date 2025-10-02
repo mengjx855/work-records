@@ -1,0 +1,69 @@
+---
+title: "MBX CD Homo feces HM700 BGI"
+author: "Jinxin Meng"
+date: "2024-12-20"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## MBX CD Homo feces
+
+```{R}
+#### info ####
+grp <- c('CD', 'HC')
+grp_col <- c("CD" = "#eeacec", "HC" = "#21c1dc")
+
+metabolite_info <- read.delim("../data/metabolite_info.txt")
+group <- read.delim("../data/group.txt") %>% 
+  filter(!sample %in% c('24NP20830045','24NP20830002','24NP20830043','24NP20830038',
+                        '24NP20830046','24NP20830013','24NP20830014'))
+profile <- read.delim("../data/profile.txt", row.names = 1, check.names = F) %>% 
+  select(all_of(group$sample))
+
+#### PCA ####
+plot_PCA(profile, group, add_group = T, lab_size = 3, aspect_ratio = 4/5)
+ggsave("PCA.pdf", width = 5, height = 4)
+
+#### diff ####
+plsda <- opls(data.frame(t(profile)), y = pull(group, group), predI = 5)
+diff <- difference_analysis(profile, group, group_pair = grp)
+
+out <- plsda@vipVn %>%
+  data.frame(vip = .) %>% 
+  rownames_to_column("name") %>% 
+  left_join(diff, ., by = "name") %>% 
+  mutate(enriched = ifelse(vip > 1 & pval < 0.05 & log2FC > 0, "CD", 
+                           ifelse(vip > 1 & pval < 0.05 & log2FC < 0, "HC", "none"))) %>% 
+  rename(ID = name) %>% 
+  left_join(metabolite_info, 'ID') %>% 
+  mutate(enriched = factor(enriched, c("CD", "none", "HC")),
+         .log2FC = ifelse(log2FC > 5, 5, ifelse(log2FC < -5, -5, log2FC)))
+openxlsx::write.xlsx(out, "diff.xlsx")
+
+filter(out, !is.na(enriched)) %>% 
+  ggscatter(".log2FC", "vip", color = "enriched", legend = "right",
+          palette = c("#eeacec", "grey", "#21c1dc"), size = 2) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  theme(aspect.ratio = 1)
+ggsave("diff.volcano.pdf", height = 5, width = 6)
+
+
+# Phenyllactic acid HMDB0000779
+# L-3-Phenyllactic acid HMDB0000748
+data.frame(profile["HMDB0000779",], check.names = F) %>% 
+  t() %>% data.frame %>% rename(value = 1) %>%
+  rownames_to_column("sample") %>% 
+  left_join(group, by = "sample") %>% 
+  ggboxplot(x = "group", "value", fill = "group", palette = grp_col, 
+            legend = "none", xlab = "", ylab = "Contents", title = 'Phenyllactic acid') +
+  stat_compare_means(comparisons = list(c("CD", "HC")), label = "p.signif") +
+  theme(aspect.ratio = 1.2) 
+ggsave("PLA.boxplot.pdf", height = 3.4, width = 3)
+```

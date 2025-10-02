@@ -1,0 +1,177 @@
+---
+title: "Bile acids-target MBX on PDCoV Sus Serum ZhangYQ"
+author: "Jinxin Meng"
+date: "2025-03-29"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## MBX downstream analysis 
+
+```{R}
+#### info ####
+grp <- c('Mock','PDCoV')
+grp_col <- structure(c('#a0a0a4','#d7b0b0'), names = grp)
+
+MBT_info <- read.delim("../data/MBT_info.tsv") %>% 
+  filter(filter == 'no')
+group <- read.delim("../data/group_rename.tsv")
+profile <- read.delim("../data/MBT_profile.tsv", row.names = 1) %>% 
+  select(all_of(group$sample)) %>% 
+  filter(rownames(.) %in% MBT_info$cpd_id)
+rownames(profile) <- MBT_info$cpd_abbr[match(rownames(profile), MBT_info$cpd_id)]
+
+#### PCA ####
+source("/code/R_func/plot_PCA.R")
+
+plot_PCA(profile, group, group_order = grp, group_color = grp_col, 
+         add_group_label = T,  lab_size = 3, ellipse_level = .9, 
+         show_legend = F, show_grid = T, show_line = F)
+ggsave("PCA.pdf", width = 4, height = 3)
+
+#### PLS ####
+source("/code/R_func/plot_PLS.R")
+
+plot_PLS(log10(profile), group, group_order = grp, group_color = grp_col,
+         add_group_label = T,  lab_size = 3, ellipse_level = .7, 
+         show_legend = F, show_grid = T, show_line = F)
+ggsave("PLS.pdf", width = 4, height = 3)
+
+#### diff ####
+plsda <- opls(data.frame(t(log10(profile))), y = pull(group, group), orthoI = 0)
+diff <- difference_analysis(profile, group, comparison = c('PDCoV', 'Mock'),
+                            method = 'wilcox')
+
+diff <- data.frame(plsda_vip = plsda@vipVn) %>% 
+  rownames_to_column("name") %>% 
+  left_join(diff, ., by = "name") %>% 
+  mutate(enriched = ifelse((plsda_vip > 1 | pval < 0.05) & log2FC > 0, "PDCoV", 
+                           ifelse((plsda_vip > 1 | pval < 0.05) & log2FC < 0, 
+                                  "Mock", "none"))) %>% 
+  left_join(MBT_info, c('name' = 'cpd_abbr'))
+write.xlsx(diff, "diff.xlsx")
+
+#### all ab ###
+.level <- c('CA','CDCA','HCA','DCA','LCA','UDCA','HDCA','GCA','TCA','GCDCA',
+             'TCDCA','GHCA','THCA','THDCA','GUDCA','TUDCA','GDCA','TDCA',
+             'GLCA','TLCA')
+
+data <- profile %>% 
+  rownames_to_column('name') %>% 
+  gather('sample', 'value', -name) %>% 
+  left_join(group, by = 'sample') %>% 
+  left_join(select(MBT_info, cpd_abbr, structure), by = c('name' = 'cpd_abbr')) %>% 
+  mutate(.value = log10(value),
+         name = factor(name, .level))
+
+data %>% 
+  group_by(name) %>% 
+  rstatix::wilcox_test(value ~ group) %>% 
+  add_significance('p')
+
+ggboxplot(data, 'name', '.value', fill = 'group', palette = grp_col, width = .6,
+          outlier.shape = NA, xlab = '', ylab = 'log10 content', legend = 'none',
+          x.text.angle = 45)
+ggsave('biles_ab.pdf', width = 7, height = 3)
+
+#### source ####
+data <- profile %>% 
+  mutate(source = MBT_info$source[match(rownames(.), MBT_info$cpd_abbr)]) %>% 
+  aggregate(. ~ source, ., sum) %>% 
+  column_to_rownames('source') %>% 
+  t %>% 
+  data.frame() %>% 
+  mutate(value = Secondary / Primary) %>% 
+  rownames_to_column('sample') %>% 
+  left_join(group, by = 'sample')
+
+data %>% 
+  rstatix::t_test(value ~ group)
+
+ggbarplot(data, 'group', 'value', fill = 'group', palette = grp_col,
+          add = c('mean_se', 'jitter'), legend = 'none', width = .618,
+          xlab = '', ylab = "Secondary / Primary bile acids") +
+  ggsignif::geom_signif(annotations = 'ns', y_position = 1.2, 
+                        xmin = 1, xmax = 2) +
+  theme(aspect.ratio = 1.5,
+        plot.title = element_text(size = 12))
+ggsave('source.barplot.pdf', width = 3, height = 4)
+
+#### structure ####
+data <- profile %>% 
+  mutate(structure = MBT_info$structure[match(rownames(.), MBT_info$cpd_abbr)]) %>% 
+  aggregate(. ~ structure, ., sum) %>%  
+  column_to_rownames('structure') %>% 
+  t %>% 
+  data.frame() %>% 
+  mutate(value = Unconjugated / Conjugated) %>% 
+  rownames_to_column('sample') %>% 
+  left_join(group, by = 'sample')
+
+rstatix::t_test(data, value ~ group)
+
+ggboxplot(data, 'group', 'value', fill = 'group', palette = grp_col,
+          legend = 'none', width = .618, xlab = '', 
+          ylab = "Unconjugated / Conjugated bile acids") +
+  # lims(y = c(2, 4.5)) +
+  stat_compare_means(comparisons = list(grp), method = 't', label.y = 3,
+                     label = 'p.signif', tip.length = .003, vjust = .5) +
+  theme(aspect.ratio = 1.5,
+        plot.title = element_text(size = 12))
+
+ggsave('source.barplot.pdf', width = 5, height = 3)
+
+
+#### correlation 20250331 ####
+# virus_load / fecal virus_load
+metadata <- cbind(
+  read.delim('../../MGX_WGS_PDCoV_Sus_feces/data/metadata_virus_load.tsv') %>% 
+    filter(group %in% c('Mock', 'PDCoV')) %>% 
+    group_by(group) %>% 
+    slice_tail(n = 5) %>% 
+    ungroup() %>% 
+    select(-group, -type), 
+  read.delim('../../MGX_WGS_PDCoV_Sus_feces/data/metadata_fecal_virus_load.tsv') %>% 
+    filter(group %in% c('Mock', 'PDCoV')) %>% 
+    group_by(group) %>% 
+    slice_tail(n = 5) %>% 
+    ungroup() %>% 
+    select(feces = D3)) %>% 
+  select(-MLN)
+
+MBT_info <- read.delim('../data/MBT_info.tsv') %>% 
+  filter(filter == 'no', structure == 'Unconjugated')
+MBT_group <- read.delim('../data/group_rename.tsv') %>% 
+  group_by(group) %>% 
+  slice_sample(n = 5)
+MBT_profile <- read.delim('../data/MBT_profile.tsv', row.names = 1) %>% 
+  select(all_of(MBT_group$sample)) %>% 
+  filter(rownames(.) %in% MBT_info$cpd_id)
+rownames(MBT_profile) <- MBT_info$cpd_abbr[match(rownames(MBT_profile), MBT_info$cpd_id)]
+
+corr <- psych::corr.test(t(MBT_profile), metadata)
+r_data <- data.frame(t(corr$r), check.names = F)
+p_data <- data.frame(t(corr$p), check.names = F)
+
+plot_data <- data.frame(t(corr$r), check.names = F)
+
+plot_label <- data.frame(t(corr$p), check.names = F) %>%
+  apply(2, \(x) ifelse(x < 0.001, "**", ifelse(x < 0.05, "*", "")))
+
+pheatmap(plot_data,
+         cluster_rows = T, cluster_cols = T,
+         border = "#ffffff", border_gp = gpar(col = "#000000"),
+         show_rownames = T, show_colnames = T,
+         cellwidth = 10,cellheight = 10,
+         treeheight_col = 0, treeheight_row = 0,
+         fontsize_col = 8, fontsize_row = 8,
+         display_numbers = plot_label, 
+         angle_col = "90",
+         heatmap_legend_param = list(title = 'spearman coef.'))
+```

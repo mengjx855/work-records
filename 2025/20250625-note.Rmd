@@ -1,0 +1,1160 @@
+---
+title: "MGX Pig gut microbiome analysis (Primary)"
+author: "Jinxin Meng"
+date: "2025-06-25"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## alpha div
+
+```{R}
+#### calculate alpha div metrics ####
+source('/data/mengjx/R_proj/R_func/diversity.R')
+source('/data/mengjx/R_proj/R_func/palette.R')
+
+profile <- readRDS('data/filtered_profile.t.f.rds')
+rownames(profile) <- paste0('PIG_', stringr::str_extract(rownames(profile), 'GENOME\\d+'))
+tree <- ape::read.tree('data/RAxML_bestTree.species_faa_refined.renamed.tre')
+
+data <- map(c('chao1','richness','shannon','simpson','pd'), ~
+              calcu_alpha(profile, method = .x, out_colnames = .x, tree = tree)) %>% 
+  reduce(~ left_join(.x, .y, by = 'sample'))
+
+saveRDS(data, 'alpha_div/div_alpha.data.rds')
+write.xlsx(data, 'alpha_div/div_alpha.data.xlsx')
+
+#### alpha div 2003 samples with whole metadata ####
+profile <- readRDS('data/filtered_profile.t.f.rds')
+
+# all samples without NA variables
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  mutate(seq_length = as.character(seq_length)) %>% 
+  column_to_rownames('run_ID') %>% 
+  na.omit()
+data <- readRDS('alpha_div/div_alpha.data.rds') %>% 
+  filter(sample %in% rownames(group)) %>% 
+  column_to_rownames('sample')
+
+# Fit models
+Maaslin2(input_data = data,               
+         input_metadata = group,
+         output = 'alpha_div/maaslin2.alpha_div.2003_samples/', 
+         fixed_effects = c('breed_lv1','sex_lv1','growth_stage_lv1','region_lv2',
+                           'collection_year','location_lv1','location_lv2'),
+         reference = 'sex_lv1:female;breed_lv1,commercialization;growth_stage_lv1,piglet;region_lv2,feces;location_lv1,Asia;location_lv2,China',
+         random_effects =  c('project_ID','seq_platform','seq_length'), 
+         normalization = 'NONE',
+         transform = 'NONE',
+         standardize = TRUE,
+         max_significance = 0.25,
+         max_pngs = 100, 
+         cores = 1, 
+         save_models = TRUE)
+
+fit <- read.delim('alpha_div/maaslin2.alpha_div.2003_samples/significant_results.tsv') %>% 
+  mutate(color_value = -log(qval) * sign(coef),
+         color_value = ifelse(color_value > 50, 50, color_value),
+         color_value = ifelse(color_value < -50, -50, color_value),
+         size_value = abs(color_value),
+         label_value = ifelse(color_value > 0, '+', '-'),
+         name = paste0(metadata, '.', value)) %>% 
+  filter(qval < 0.05)
+
+ggplot(fit, aes(feature, name)) +
+  geom_tile(aes(fill = color_value)) +
+  geom_text(aes(label = label_value)) +
+  scale_size_continuous(range = c(1, 5)) +
+  scale_fill_gradient2(low = '#abdda4', mid = '#ffffff', high = '#fdae61') +
+  scale_y_discrete(position = 'right', expand = c(0, 0)) +
+  scale_x_discrete(expand = c(0, 0)) +
+  labs(x = 'Alpha-diversity metrics', y = '') +
+  coord_fixed() +
+  theme_bw() +
+  theme(axis.ticks.length = unit(1.5, 'mm'),
+        axis.ticks = element_line(color = '#000000'),
+        axis.text = element_text(color = '#000000', size = 10),
+        axis.text.x = element_text(angle = 30, hjust = 1),
+        panel.grid = element_blank(),
+        panel.border = element_rect(fill = 'transparent', color = '#000000',
+                                    linewidth = .5))
+ggsave('alpha_div/maaslin2.alpha_div.2003_samples.tile.pdf', width = 8, height = 4)
+
+#### alpha div breed_lv1 ####
+# project_ID, seq_platform, seq_length 这些变量不是我们关心的，只作为协变量；
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  column_to_rownames('run_ID') %>% 
+  dplyr::select(project_ID, seq_platform, seq_length, breed_lv1) %>% 
+  na.omit()
+
+data <- readRDS('alpha_div/div_alpha.data.rds') %>% 
+  filter(sample %in% rownames(group)) %>% 
+  column_to_rownames('sample')
+
+Maaslin2(input_data = data,               
+         input_metadata = group,
+         output = 'alpha_div/maaslin2.alpha_div.breed_lv1', 
+         fixed_effects = c('breed_lv1'),
+         reference = 'breed_lv1,commercialization',
+         random_effects =  c('project_ID','seq_platform','seq_length'), 
+         normalization = 'NONE',
+         transform = 'NONE',
+         standardize = TRUE,
+         max_significance = 0.25,
+         max_pngs = 100,
+         cores = 1, 
+         save_models = TRUE)
+
+fit <- read.delim('alpha_div/maaslin2.alpha_div.breed_lv1/all_results.tsv')
+fit
+
+plot_data <- rownames_to_column(data, 'sample') %>% 
+  left_join(rownames_to_column(group, 'sample'), by = 'sample')
+
+map(c('chao1','richness','shannon','simpson','pd'), \(x)
+    ggviolin(plot_data, 'breed_lv1', x, fill = 'breed_lv1', legend = 'none', width = .8, 
+             xlab = '', ylab = '', title = paste0(x, ' (n=', nrow(plot_data), ')'), 
+             palette = c('#5773cc','#ffb900'), , trim = T) +
+      geom_boxplot(width = .25, outlier.shape = NA) +
+      theme(aspect.ratio = 2,
+            axis.line = element_blank(),
+            plot.title = element_text(face = 'bold', hjust = .5),
+            panel.background = element_rect(color = 'black', linewidth = .8),
+            axis.ticks.length = unit(2, 'mm')) ) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', nrow = 1)
+ggsave('alpha_div/maaslin2.alpha_div.breed_lv1.violin.pdf', width = 12.5, height = 4)
+
+#### alpha div breed_lv2 vs commerical ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  column_to_rownames('run_ID') %>% 
+  dplyr::select(project_ID, seq_platform, seq_length, breed_lv1, breed_lv2) %>% 
+  mutate(breed_lv2 = ifelse(breed_lv1 == 'commercialization', 'Commerical pig', breed_lv2)) %>% 
+  na.omit()
+
+names <- count(group, breed_lv2) %>% 
+  filter(n >= 20) %>% 
+  pull(breed_lv2)
+
+group <- filter(group, breed_lv2 %in% names)
+
+data <- readRDS('alpha_div/div_alpha.data.rds') %>% 
+  filter(sample %in% rownames(group)) %>% 
+  column_to_rownames('sample')
+
+Maaslin2(input_data = data,               
+         input_metadata = group,
+         output = 'alpha_div/maaslin2.alpha_div.breed_lv2.vs_commerical', 
+         fixed_effects = c('breed_lv2'),
+         reference = 'breed_lv2,Commerical pig',
+         random_effects =  c('project_ID','seq_platform','seq_length'), 
+         normalization = 'NONE',
+         transform = 'NONE',
+         standardize = TRUE,
+         max_significance = 0.25,
+         max_pngs = 100,
+         cores = 1, 
+         save_models = TRUE)
+
+fit <- read.delim('alpha_div/maaslin2.alpha_div.breed_lv2.vs_commerical/all_results.tsv') %>% 
+  mutate(color_value = -log(qval) * sign(coef),
+         color_value = ifelse(color_value > 50, 50, color_value),
+         color_value = ifelse(color_value < -50, -50, color_value),
+         size_value = abs(color_value),
+         label_value = ifelse(color_value > 0, '+', '-'),
+         name = paste0(metadata, '.', value)) %>% 
+  filter(qval < 0.05)
+
+ggplot(fit, aes(feature, name)) +
+  geom_tile(aes(fill = color_value)) +
+  geom_text(aes(label = label_value)) +
+  scale_size_continuous(range = c(1, 5)) +
+  scale_fill_gradient2(low = '#abdda4', mid = '#ffffff', high = '#fdae61') +
+  scale_y_discrete(position = 'right', expand = c(0, 0)) +
+  scale_x_discrete(expand = c(0, 0)) +
+  labs(x = 'Alpha-diversity metrics', y = '', 
+       title = 'Total of 16 native breeds [sample_n > 20] versus commerical pig') +
+  coord_fixed() +
+  theme_bw() +
+  theme(axis.ticks.length = unit(1.5, 'mm'),
+        axis.ticks = element_line(color = '#000000'),
+        axis.text = element_text(color = '#000000', size = 10),
+        axis.text.x = element_text(angle = 30, hjust = 1),
+        plot.title = element_text(face = 'bold', size = 12),
+        panel.grid = element_blank(),
+        panel.border = element_rect(fill = 'transparent', color = '#000000', linewidth = .5))
+ggsave('alpha_div/maaslin2.alpha_div.breed_lv2.vs_commerical.tile.pdf', width = 8, height = 4)
+
+#### alpha div breed_lv2 vs natives ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  column_to_rownames('run_ID') %>% 
+  dplyr::select(project_ID, seq_platform, seq_length, breed_lv1, breed_lv2) %>% 
+  mutate(breed_lv2 = ifelse(breed_lv1 == 'natives', 'natives', breed_lv2)) %>% 
+  na.omit()
+
+names <- count(group, breed_lv2) %>% 
+  filter(n >= 20) %>% 
+  pull(breed_lv2)
+
+group <- filter(group, breed_lv2 %in% names)
+
+data <- readRDS('alpha_div/div_alpha.data.rds') %>% 
+  filter(sample %in% rownames(group)) %>% 
+  column_to_rownames('sample')
+
+Maaslin2(input_data = data,               
+         input_metadata = group,
+         output = 'alpha_div/maaslin2.alpha_div.breed_lv2.vs_natives', 
+         fixed_effects = c('breed_lv2'),
+         reference = 'breed_lv2,natives',
+         random_effects =  c('project_ID','seq_platform','seq_length'), 
+         normalization = 'NONE',
+         transform = 'NONE',
+         standardize = TRUE,
+         max_significance = 0.25,
+         max_pngs = 100,
+         cores = 1, 
+         save_models = TRUE)
+
+fit <- read.delim('alpha_div/maaslin2.alpha_div.breed_lv2.vs_natives/all_results.tsv') %>% 
+  mutate(color_value = -log(qval) * sign(coef),
+         color_value = ifelse(color_value > 50, 50, color_value),
+         color_value = ifelse(color_value < -50, -50, color_value),
+         size_value = abs(color_value),
+         label_value = ifelse(color_value > 0, '+', '-'),
+         name = paste0(metadata, '.', value)) %>% 
+  filter(qval < 0.05)
+
+ggplot(fit, aes(feature, name)) +
+  geom_tile(aes(fill = color_value)) +
+  geom_text(aes(label = label_value)) +
+  scale_size_continuous(range = c(1, 5)) +
+  scale_fill_gradient2(low = '#abdda4', mid = '#ffffff', high = '#fdae61') +
+  scale_y_discrete(position = 'right', expand = c(0, 0)) +
+  scale_x_discrete(expand = c(0, 0)) +
+  labs(x = 'Alpha-diversity metrics', y = '', 
+       title = 'Total of 13 commerical breeds [sample_n > 20] versus natives pig') +
+  coord_fixed() +
+  theme_bw() +
+  theme(axis.ticks.length = unit(1.5, 'mm'),
+        axis.ticks = element_line(color = '#000000'),
+        axis.text = element_text(color = '#000000', size = 10),
+        axis.text.x = element_text(angle = 30, hjust = 1),
+        plot.title = element_text(face = 'bold', size = 12),
+        panel.grid = element_blank(),
+        panel.border = element_rect(fill = 'transparent', color = '#000000', linewidth = .5))
+ggsave('alpha_div/maaslin2.alpha_div.breed_lv2.vs_natives.tile.pdf', width = 8, height = 3)
+
+#### alpha div sex_lv1 ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  column_to_rownames('run_ID') %>% 
+  dplyr::select(project_ID, seq_platform, seq_length, sex_lv1) %>% 
+  na.omit()
+
+data <- readRDS('alpha_div/div_alpha.data.rds') %>% 
+  filter(sample %in% rownames(group)) %>% 
+  column_to_rownames('sample')
+
+Maaslin2(input_data = data,               
+         input_metadata = group,
+         output = 'alpha_div/maaslin2.alpha_div.sex_lv1', 
+         fixed_effects = c('sex_lv1'),
+         reference = 'sex_lv1,female',
+         random_effects =  c('project_ID','seq_platform','seq_length'), 
+         normalization = 'NONE',
+         transform = 'NONE',
+         standardize = TRUE,
+         max_significance = 0.25,
+         max_pngs = 100,
+         cores = 1, 
+         save_models = TRUE)
+
+plot_data <- rownames_to_column(data, 'sample') %>% 
+  left_join(rownames_to_column(group, 'sample'), by = 'sample')
+
+map(c('chao1','richness','shannon','simpson','pd'), \(x)
+    ggviolin(plot_data, 'sex_lv1', x, fill = 'sex_lv1', legend = 'none', width = .8, 
+             xlab = '', ylab = '', title = paste0(x, ' (n=', nrow(plot_data), ')'), 
+             palette = c('#5773cc','#ffb900'), trim = T) +
+      geom_boxplot(width = .25, outlier.shape = NA) +
+      theme(aspect.ratio = 2,
+            axis.line = element_blank(),
+            plot.title = element_text(face = 'bold', hjust = .5),
+            panel.background = element_rect(color = 'black', linewidth = .8),
+            axis.ticks.length = unit(2, 'mm')) ) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', nrow = 1)
+ggsave('alpha_div/maaslin2.alpha_div.sex_lv1.violin.pdf', width = 12.5, height = 4)
+
+#### alpha div growth_stage_lv1 ####
+library(ggpmisc)
+
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  column_to_rownames('run_ID') %>% 
+  dplyr::select(project_ID, seq_platform, seq_length, growth_stage_lv1) %>% 
+  na.omit()
+
+data <- readRDS('alpha_div/div_alpha.data.rds') %>% 
+  filter(sample %in% rownames(group)) %>% 
+  column_to_rownames('sample')
+
+Maaslin2(input_data = data,               
+         input_metadata = group,
+         output = 'alpha_div/maaslin2.alpha_div.growth_stage_lv1', 
+         fixed_effects = c('growth_stage_lv1'),
+         reference = 'growth_stage_lv1,piglet',
+         random_effects =  c('project_ID','seq_platform','seq_length'), 
+         normalization = 'NONE',
+         transform = 'NONE',
+         standardize = TRUE,
+         max_significance = 0.25,
+         max_pngs = 100,
+         cores = 1, 
+         save_models = TRUE)
+
+plot_data <- rownames_to_column(data, 'sample') %>% 
+  left_join(rownames_to_column(group, 'sample'), by = 'sample') %>% 
+  mutate(growth_stage_lv1 = factor(growth_stage_lv1, c('newborn','piglet','early stage of growing',
+                                                       'middle stage of growing', 'growing',
+                                                       'later stage of growing', 'adult','sow')),
+         .growth_stage_lv1 = as.numeric(growth_stage_lv1))
+
+map(c('chao1','richness','shannon','simpson','pd'), \(x)
+    ggviolin(plot_data, 'growth_stage_lv1', x, fill = 'growth_stage_lv1', legend = 'none', 
+             width = 1, xlab = '', ylab = '', title = paste0(x, ' (n=', nrow(plot_data), ')'),
+             palette = pald('set3'), trim = T) +
+      rotate_x_text(30) +
+      geom_boxplot(width = .2, outlier.shape = NA) +
+      theme(aspect.ratio = 1/2.2,
+            axis.line = element_blank(),
+            plot.title = element_text(face = 'bold', hjust = .5),
+            panel.background = element_rect(color = 'black', linewidth = .8),
+            axis.ticks.length = unit(2, 'mm')) ) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', ncol = 1)
+ggsave('alpha_div/maaslin2.alpha_div.growth_stage_lv1.violin.pdf', width = 6, height = 20)
+
+map(c('chao1','richness','shannon','simpson','pd'), \(x) {
+  .plot_data <- dplyr::select(plot_data, index = all_of(x), growth_stage_lv1, .growth_stage_lv1)
+  .stat_data <- dplyr::select(.plot_data, index, growth_stage_lv1) %>%
+    group_by(growth_stage_lv1) %>% 
+    get_summary_stats(type = c('five_number'))
+  
+  ggplot() +
+    geom_jitter(aes(growth_stage_lv1, index, color = growth_stage_lv1), .plot_data, 
+                width = .6, size = 1, alpha = .6) +
+    geom_errorbar(aes(growth_stage_lv1, ymin = q1, ymax = q3), .stat_data, width = .2) +
+    geom_point(aes(growth_stage_lv1, median, fill = growth_stage_lv1), .stat_data, shape = 21, 
+               color = '#000000', size = 4) +
+    geom_smooth(aes(.growth_stage_lv1, index), .plot_data, method = 'lm', color = '#ff0000') +
+    geom_smooth(aes(.growth_stage_lv1, index), .plot_data, method = 'loess', color = '#377eb8') +
+    stat_poly_eq(aes(.growth_stage_lv1, index, label = 
+                       after_stat(paste(eq.label,rr.label,p.value.label, sep = '~~~~~'))), 
+                 .plot_data) +
+    scale_fill_manual(values = pald('set3')) +
+    scale_color_manual(values = pald('set3')) +
+    labs(x = '', y = '', title = paste0(x, ' (n=', nrow(.plot_data), ')')) +
+    theme_pubr() +
+    theme(aspect.ratio = 1/2,
+          axis.text.x = element_text(angle = 30, size = 10, color = '#000000', hjust = 1),
+          axis.line = element_blank(),
+          plot.title = element_text(face = 'bold', hjust = .5),
+          panel.background = element_rect(color = '#000000', linewidth = .8),
+          axis.ticks.length = unit(2, 'mm')) +
+    guides(color = guide_none(), 
+           fill = guide_none()) } ) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', ncol = 1)
+ggsave('alpha_div/maaslin2.alpha_div.growth_stage_lv1.lm_fit.pdf', width = 6, height = 20)
+
+#### alpha div region_lv2 ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  column_to_rownames('run_ID') %>% 
+  dplyr::select(project_ID, seq_platform, seq_length, region_lv2) %>% 
+  na.omit()
+
+data <- readRDS('alpha_div/div_alpha.data.rds') %>% 
+  filter(sample %in% rownames(group)) %>% 
+  column_to_rownames('sample')
+
+Maaslin2(input_data = data,               
+         input_metadata = group,
+         output = 'alpha_div/maaslin2.alpha_div.region_lv2', 
+         fixed_effects = c('region_lv2'),
+         reference = 'region_lv2,feces',
+         random_effects =  c('project_ID','seq_platform','seq_length'), 
+         normalization = 'NONE',
+         transform = 'NONE',
+         standardize = TRUE,
+         max_significance = 0.25,
+         max_pngs = 100,
+         cores = 1, 
+         save_models = TRUE)
+
+plot_data <- rownames_to_column(data, 'sample') %>% 
+  left_join(rownames_to_column(group, 'sample'), by = 'sample') %>% 
+  mutate(region_lv2 = factor(region_lv2, c('gastric content','duodenal content','jejunal content',
+                                           'ileal content','cecal content','colonic content',
+                                           'rectal content','feces')),
+         .region_lv2 = as.numeric(region_lv2))
+
+map(c('chao1','richness','shannon','simpson','pd'), \(x)
+    ggviolin(plot_data, 'region_lv2', x, fill = 'region_lv2', legend = 'none', width = 1, 
+             xlab = '', ylab = '', title = paste0(x, ' (n=', nrow(plot_data), ')'),
+             palette = pald('set3'), trim = T) +
+      rotate_x_text(30) +
+      geom_boxplot(width = .2, outlier.shape = NA) +
+      theme(aspect.ratio = 1/2.2,
+            axis.line = element_blank(),
+            plot.title = element_text(face = 'bold', hjust = .5),
+            panel.background = element_rect(color = 'black', linewidth = .8),
+            axis.ticks.length = unit(1.5, 'mm')) ) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', ncol = 1)
+ggsave('alpha_div/maaslin2.alpha_div.region_lv2.violin.pdf', width = 6, height = 20)
+
+map(c('chao1','richness','shannon','simpson','pd'), \(x) {
+  .plot_data <- dplyr::select(plot_data, index = all_of(x), region_lv2, .region_lv2)
+  .stat_data <- dplyr::select(.plot_data, index, region_lv2) %>%
+    group_by(region_lv2) %>% 
+    get_summary_stats(type = c('five_number'))
+  
+  ggplot() +
+    geom_jitter(aes(region_lv2, index, color = region_lv2), .plot_data, 
+                width = .6, size = 1, alpha = .6) +
+    geom_errorbar(aes(region_lv2, ymin = q1, ymax = q3), .stat_data, width = .2) +
+    geom_point(aes(region_lv2, median, fill = region_lv2), .stat_data, shape = 21, 
+               color = '#000000', size = 4) +
+    geom_smooth(aes(.region_lv2, index), .plot_data, method = 'lm', color = '#ff0000') +
+    stat_poly_eq(aes(.region_lv2, index, label = 
+                       after_stat(paste(eq.label,rr.label,p.value.label, sep = '~~~~~'))), 
+                 .plot_data) +
+    scale_fill_manual(values = pald('set3')) +
+    scale_color_manual(values = pald('set3')) +
+    labs(x = '', y = '', title = paste0(x, ' (n=', nrow(.plot_data), ')')) +
+    theme_pubr() +
+    theme(aspect.ratio = 1/2,
+          axis.text.x = element_text(angle = 30, size = 10, color = '#000000', hjust = 1),
+          axis.line = element_blank(),
+          plot.title = element_text(face = 'bold', hjust = .5),
+          panel.background = element_rect(color = '#000000', linewidth = .8),
+          axis.ticks.length = unit(2, 'mm')) +
+    guides(color = guide_none(), 
+           fill = guide_none()) } ) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', ncol = 1)
+ggsave('alpha_div/maaslin2.alpha_div.region_lv2.lm_fit.pdf', width = 6, height = 20)
+
+#### alpha div collection_year ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  column_to_rownames('run_ID') %>% 
+  dplyr::select(project_ID, seq_platform, seq_length, collection_year) %>% 
+  na.omit()
+
+data <- readRDS('alpha_div/div_alpha.data.rds') %>% 
+  filter(sample %in% rownames(group)) %>% 
+  column_to_rownames('sample')
+
+Maaslin2(input_data = data,               
+         input_metadata = group,
+         output = 'alpha_div/maaslin2.alpha_div.collection_year', 
+         fixed_effects = c('collection_year'),
+         random_effects =  c('project_ID','seq_platform','seq_length'), 
+         normalization = 'NONE',
+         transform = 'NONE',
+         standardize = TRUE,
+         max_significance = 0.25,
+         max_pngs = 100,
+         cores = 1, 
+         save_models = TRUE)
+
+plot_data <- rownames_to_column(data, 'sample') %>% 
+  left_join(rownames_to_column(group, 'sample'), by = 'sample') %>% 
+  filter(collection_year > 2010)
+
+map(c('chao1','richness','shannon','simpson','pd'), \(x)
+    ggviolin(plot_data, 'collection_year', x, fill = 'collection_year', legend = 'none', width = 1, 
+             xlab = '', ylab = '', title = paste0(x, ' (n=', nrow(plot_data), ')'),
+             palette = pald('set3'), trim = T) +
+      geom_boxplot(width = .2, outlier.shape = NA) +
+      theme(aspect.ratio = 1/2.2,
+            axis.line = element_blank(),
+            plot.title = element_text(face = 'bold', hjust = .5),
+            panel.background = element_rect(color = 'black', linewidth = .8),
+            axis.ticks.length = unit(2, 'mm')) ) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', ncol = 1)
+ggsave('alpha_div/maaslin2.alpha_div.collection_year.violin.pdf', width = 6, height = 16)
+
+map(c('chao1','richness','shannon','simpson','pd'), \(x) {
+  .plot_data <- dplyr::select(plot_data, index = all_of(x), collection_year)
+  .stat_data <- dplyr::select(.plot_data, index, collection_year) %>%
+    group_by(collection_year) %>% 
+    get_summary_stats(type = c('five_number'))
+  
+  ggplot() +
+    geom_jitter(aes(collection_year, index, color = collection_year), .plot_data, 
+                width = .6, size = 1, alpha = .6) +
+    geom_errorbar(aes(collection_year, ymin = q1, ymax = q3), .stat_data, width = .2) +
+    geom_point(aes(collection_year, median, fill = collection_year), .stat_data, shape = 21, 
+               color = '#000000', size = 4) +
+    geom_smooth(aes(collection_year, index), .plot_data, method = 'lm', color = '#e41a1c') +
+    geom_smooth(aes(collection_year, index), .plot_data, method = 'loess', color = '#377eb8') +
+    stat_poly_eq(aes(collection_year, index, label = 
+                       after_stat(paste(eq.label,rr.label,p.value.label, sep = '~~~~~'))), 
+                 .plot_data) +
+    scale_x_continuous(breaks = seq(2012, 2023), name = seq(2012, 2023), expand = c(.02, .02)) +
+    scale_color_gradient(low = '#c7e9b4', high = '#41b6c4') +
+    scale_fill_gradient(low = '#c7e9b4', high = '#41b6c4') +
+    labs(x = '', y = '', title = paste0(x, ' (n=', nrow(.plot_data), ')')) +
+    theme_pubr() +
+    theme(aspect.ratio = 1/2,
+          axis.text.x = element_text(size = 10, color = '#000000', hjust = .5),
+          axis.line = element_blank(),
+          plot.title = element_text(face = 'bold', hjust = .5),
+          panel.background = element_rect(color = '#000000', linewidth = .8),
+          axis.ticks.length = unit(2, 'mm')) +
+    guides(color = guide_none(), 
+           fill = guide_none()) } ) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', ncol = 1)
+ggsave('alpha_div/maaslin2.alpha_div.collection_year.lm_fit.pdf', width = 6, height = 16)
+
+#### alpha div location_lv1 ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  column_to_rownames('run_ID') %>% 
+  dplyr::select(project_ID, seq_platform, seq_length, location_lv1) %>% 
+  na.omit()
+
+names <- count(group, location_lv1) %>% 
+  filter(n >= 20) %>% 
+  pull(location_lv1)
+
+group <- filter(group, location_lv1 %in% names)
+
+data <- readRDS('alpha_div/div_alpha.data.rds') %>% 
+  filter(sample %in% rownames(group)) %>% 
+  column_to_rownames('sample')
+
+Maaslin2(input_data = data,               
+         input_metadata = group,
+         output = 'alpha_div/maaslin2.alpha_div.location_lv1', 
+         fixed_effects = c('location_lv1'),
+         random_effects =  c('project_ID','seq_platform','seq_length'), 
+         reference = 'location_lv1,Asia',
+         normalization = 'NONE',
+         transform = 'NONE',
+         standardize = TRUE,
+         max_significance = 0.25,
+         max_pngs = 100,
+         cores = 1, 
+         save_models = TRUE)
+
+plot_data <- rownames_to_column(data, 'sample') %>% 
+  left_join(rownames_to_column(group, 'sample'), by = 'sample')
+
+map(c('chao1','richness','shannon','simpson','pd'), \(x)
+    
+    ggviolin(plot_data, 'location_lv1', x, fill = 'location_lv1', legend = 'none', width = .8, 
+             xlab = '', ylab = '', title = paste0(x, ' (n=', nrow(plot_data), ')'), trim = T,
+             palette = pald('set3')) +
+      geom_boxplot(width = .25, outlier.shape = NA) +
+      stat_compare_means(comparisons = combn(c('Asia','Europe','Oceania','North America'), m = 2, simplify = F),
+                         label = 'p.signif', step.increase = .05, vjust = .8) +
+      theme(aspect.ratio = 1,
+            axis.line = element_blank(),
+            plot.title = element_text(face = 'bold', hjust = .5),
+            panel.background = element_rect(color = 'black', linewidth = .8),
+            axis.ticks.length = unit(2, 'mm'))  ) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', nrow = 1)
+ggsave('alpha_div/maaslin2.alpha_div.location_lv1.violin.pdf', width = 20, height = 4)
+
+#### alpha div location_lv2 ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  column_to_rownames('run_ID') %>% 
+  dplyr::select(project_ID, seq_platform, seq_length, location_lv1, location_lv2) %>% 
+  na.omit()
+
+names <- count(group, location_lv2) %>% 
+  filter(n >= 20) %>% 
+  pull(location_lv2)
+
+group <- filter(group, location_lv2 %in% names)
+
+data <- readRDS('alpha_div/div_alpha.data.rds') %>% 
+  filter(sample %in% rownames(group)) %>% 
+  column_to_rownames('sample')
+
+Maaslin2(input_data = data,               
+         input_metadata = group,
+         output = 'alpha_div/maaslin2.alpha_div.location_lv2', 
+         fixed_effects = c('location_lv2'),
+         random_effects =  c('project_ID','seq_platform','seq_length'), 
+         reference = 'location_lv2,China',
+         normalization = 'NONE',
+         transform = 'NONE',
+         standardize = TRUE,
+         max_significance = 0.25,
+         max_pngs = 100,
+         cores = 1, 
+         save_models = TRUE)
+
+plot_data <- rownames_to_column(data, 'sample') %>% 
+  left_join(rownames_to_column(group, 'sample'), by = 'sample') %>% 
+  mutate(location_lv1 = as.factor(location_lv1)) %>% 
+  arrange(location_lv1)
+
+map(c('chao1','richness','shannon','simpson','pd'), \(x)
+    ggviolin(plot_data, 'location_lv2', x, fill = 'location_lv1', legend = 'none', width = .8, 
+             xlab = '', ylab = '', title = paste0(x, ' (n=', nrow(plot_data), ')'),
+             palette = pald('set3')) +
+      geom_boxplot(width = .25, outlier.shape = NA) +
+      rotate_x_text(30) +
+      theme(aspect.ratio = 1/2.5,
+            axis.line = element_blank(),
+            plot.title = element_text(face = 'bold', hjust = .5),
+            panel.background = element_rect(color = 'black', linewidth = .8),
+            axis.ticks.length = unit(2, 'mm')) ) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', nrow = 5)
+ggsave('alpha_div/maaslin2.alpha_div.location_lv2.violin.pdf', width = 8, height = 20)
+```
+
+## beta-div
+```{R}
+#### beta div metrics ####
+source('/data/mengjx/R_proj/R_func/palette.R')
+source('/data/mengjx/R_proj/R_func/plot_PCoA.R')
+source('/data/mengjx/R_proj/R_func/calcu_diff.R')
+
+profile <- readRDS('data/filtered_profile.t.f.rds')
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  rename(sample = run_ID) %>% 
+  filter(sample %in% colnames(profile))
+
+# dist <- vegdist(t(profile), method = 'bray')
+# saveRDS(dist, 'beta_div/bray_dist.rds')
+dist <- readRDS('beta_div/bray_dist.rds')
+
+# pcoa <- cmdscale(dist, k = 2, eig = T)
+# saveRDS(pcoa, 'R/beta_div/pcoa.rds')
+pcoa <- readRDS('beta_div/pcoa.rds')
+
+pcoa_data <- data.frame(pcoa$points) %>% 
+  rownames_to_column('sample') %>% 
+  left_join(group, by = 'sample')
+
+pcoa_eig <- round(pcoa$eig/sum(pcoa$eig) * 100, digits = 2)
+
+#### beta div breed_lv1 ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  dplyr::select(sample = run_ID, project_ID, seq_platform, seq_length, breed_lv1) %>% 
+  na.omit()
+
+data <- map_dfr(unique(group$breed_lv1), \(x) {
+  samples <- filter(group, breed_lv1 == x) %>% pull(sample)
+  data <- as.matrix(dist)[samples, samples]
+  data.frame(group = x, value = data[lower.tri(data)]) } )
+
+data
+
+ggviolin(data, 'group', 'value', fill = 'group', legend = 'none', width = .8, 
+         xlab = '', ylab = '', title = paste0('breed_lv1 (n=', nrow(group), ')'), 
+         palette = c('#5773cc','#ffb900'), trim = T) +
+  geom_boxplot(width = .25, outlier.shape = NA) +
+  stat_compare_means(comparisons = list(c('commercialization', 'natives')), method = 'wilcox') +
+  theme(aspect.ratio = 2,
+        axis.line = element_blank(), 
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.background = element_rect(color = 'black', linewidth = .8),
+        axis.ticks.length = unit(1.5, 'mm'))
+ggsave('beta_div/beta_div.dist_violin.breed_lv1.pdf', width = 3, height = 4)
+
+p1 <- ggscatter(pcoa_data, 'X1', 'X2', color = 'breed_lv1', legend = 'right', 
+                palette = c('#5773cc','#ffb900'), size = 1, title = 'breed_lv1',
+                xlab = 'PCoA1 (13.60%)', ylab = 'PCoA2 (9.93%)') + 
+  theme_test() +
+  theme(aspect.ratio = 1,
+        panel.border = element_rect(linewidth = .6),
+        axis.ticks.length = unit(1.5, 'mm'))
+p2 <- count(pcoa_data, breed_lv1) %>% 
+  arrange(desc(n)) %>% 
+  ggtexttable(theme = ttheme('light'))
+
+cowplot::plot_grid(p1, p2, rel_widths = c(.7, .3))
+ggsave('beta_div/beta_div.pcoa_plot.breed_lv1.pdf', width = 12, height = 6)
+
+#### beta div sex_lv1 ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  dplyr::select(sample = run_ID, project_ID, seq_platform, seq_length, sex_lv1) %>% 
+  na.omit()
+
+data <- map_dfr(unique(group$sex_lv1), \(x) {
+  samples <- filter(group, sex_lv1 == x) %>% pull(sample)
+  data <- as.matrix(dist)[samples, samples]
+  data.frame(group = x, value = data[lower.tri(data)]) } )
+
+ggviolin(data, 'group', 'value', fill = 'group', legend = 'none', width = .8, 
+         xlab = '', ylab = '', title = paste0('sex_lv1 (n=', nrow(group), ')'), 
+         palette = c('#5773cc','#ffb900'), trim = T) +
+  geom_boxplot(width = .25, outlier.shape = NA) +
+  stat_compare_means(comparisons = list(c('female', 'male')), method = 'wilcox') +
+  theme(aspect.ratio = 2,
+        axis.line = element_blank(), 
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.background = element_rect(color = 'black', linewidth = .8),
+        axis.ticks.length = unit(1.5, 'mm'))
+ggsave('beta_div/beta_div.dist_violin.sex_lv1.pdf', width = 3, height = 4)
+
+p1 <- ggscatter(pcoa_data, 'X1', 'X2', color = 'sex_lv1', legend = 'right', 
+                palette = c('#5773cc','#ffb900'), size = 1, title = 'sex_lv1',
+                xlab = 'PCoA1 (13.60%)', ylab = 'PCoA2 (9.93%)') + 
+  theme_test() +
+  theme(aspect.ratio = 1,
+        panel.border = element_rect(linewidth = .6),
+        axis.ticks.length = unit(1.5, 'mm'))
+p2 <- count(pcoa_data, sex_lv1) %>% 
+  arrange(desc(n)) %>% 
+  ggtexttable(theme = ttheme('light'))
+
+cowplot::plot_grid(p1, p2, rel_widths = c(.7, .3))
+ggsave('beta_div/beta_div.pcoa_plot.sex_lv1.pdf', width = 12, height = 6)
+
+#### beta div growth_stage_lv1 ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  dplyr::select(sample = run_ID, project_ID, seq_platform, seq_length, growth_stage_lv1) %>% 
+  na.omit()
+
+data <- map_dfr(unique(group$growth_stage_lv1), \(x) {
+  samples <- filter(group, growth_stage_lv1 == x) %>% pull(sample)
+  data <- as.matrix(dist)[samples, samples]
+  data.frame(group = x, value = data[lower.tri(data)]) } ) %>% 
+  mutate(group = factor(group, c('newborn','piglet','early stage of growing',
+                                 'middle stage of growing', 'growing',
+                                 'later stage of growing', 'adult','sow')))
+
+test_data <- pairwise_wilcox_test(data, value ~ group)
+write.xlsx(test_data, 'beta_div/beta_div.wilcox_test.growth_stage_lv1.xlsx')
+
+kruskal_test <- kruskal_test(data, value ~ group)
+
+ggviolin(data, 'group', 'value', fill = 'group', legend = 'none', width = .8, 
+         xlab = '', ylab = '', title = paste0('growth_stage_lv1 (n=', nrow(group), ')'), 
+         palette = pald('set3'), trim = T, 
+         subtitle = paste0('Kruskal-Wallis P = ', signif(kruskal_test$p, 3))) +
+  geom_boxplot(width = .25, outlier.shape = NA) +
+  rotate_x_text(30) +
+  theme(aspect.ratio = 1/2.2,
+        axis.line = element_blank(), 
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.background = element_rect(color = 'black', linewidth = .8),
+        axis.ticks.length = unit(1.5, 'mm'))
+ggsave('beta_div/beta_div.dist_violin.growth_stage_lv1.pdf', width = 6, height = 4)
+
+p1 <- ggscatter(pcoa_data, 'X1', 'X2', color = 'growth_stage_lv1', legend = 'right', 
+                palette = pald('set3'), size = 1, title = 'sex_lv1',
+                xlab = 'PCoA1 (13.60%)', ylab = 'PCoA2 (9.93%)') + 
+  theme_test() +
+  theme(aspect.ratio = 1,
+        panel.border = element_rect(linewidth = .6),
+        axis.ticks.length = unit(1.5, 'mm'))
+p2 <- count(pcoa_data, growth_stage_lv1) %>% 
+  arrange(desc(n)) %>% 
+  ggtexttable(theme = ttheme('light'))
+
+cowplot::plot_grid(p1, p2, rel_widths = c(.7, .3))
+ggsave('beta_div/beta_div.pcoa_plot.growth_stage_lv1.pdf', width = 12, height = 6)
+
+#### beta div region_lv2 ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  dplyr::select(sample = run_ID, project_ID, seq_platform, seq_length, region_lv2) %>% 
+  na.omit()
+
+data <- map_dfr(unique(group$region_lv2), \(x) {
+  samples <- filter(group, region_lv2 == x) %>% pull(sample)
+  data <- as.matrix(dist)[samples, samples]
+  data.frame(group = x, value = data[lower.tri(data)]) } ) %>% 
+  mutate(group = factor(group, c('gastric content','duodenal content','jejunal content',
+                                 'ileal content','cecal content','colonic content',
+                                 'rectal content','feces')))
+
+test_data <- pairwise_wilcox_test(data, value ~ group)
+write.xlsx(test_data, 'beta_div/beta_div.wilcox_test.region_lv2.xlsx')
+
+kruskal_test <- kruskal_test(data, value ~ group)
+
+ggviolin(data, 'group', 'value', fill = 'group', legend = 'none', width = .8, 
+         xlab = '', ylab = '', title = paste0('region_lv2 (n=', nrow(group), ')'), 
+         palette = pald('set3'), trim = T,
+         subtitle = paste0('Kruskal-Wallis P = ', signif(kruskal_test$p, 3))) +
+  geom_boxplot(width = .25, outlier.shape = NA) +
+  rotate_x_text(30) +
+  theme(aspect.ratio = 1/2.2,
+        axis.line = element_blank(), 
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.background = element_rect(color = 'black', linewidth = .8),
+        axis.ticks.length = unit(1.5, 'mm'))
+ggsave('beta_div/beta_div.dist_violin.region_lv2.pdf', width = 6, height = 4)
+
+p1 <- ggscatter(pcoa_data, 'X1', 'X2', color = 'region_lv2', legend = 'right', 
+                palette = pald('set3'), size = 1, title = 'region_lv2',
+                xlab = 'PCoA1 (13.60%)', ylab = 'PCoA2 (9.93%)') + 
+  theme_test() +
+  theme(aspect.ratio = 1,
+        panel.border = element_rect(linewidth = .6),
+        axis.ticks.length = unit(1.5, 'mm'))
+p2 <- count(pcoa_data, region_lv2) %>% 
+  arrange(desc(n)) %>% 
+  ggtexttable(theme = ttheme('light'))
+
+cowplot::plot_grid(p1, p2, rel_widths = c(.7, .3))
+ggsave('beta_div/beta_div.pcoa_plot.region_lv2.pdf', width = 12, height = 6)
+
+#### beta div collection_year ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  dplyr::select(sample = run_ID, project_ID, seq_platform, seq_length, collection_year) %>% 
+  na.omit() %>% 
+  filter(collection_year > 2010)
+
+data <- map_dfr(unique(group$collection_year), \(x) {
+  samples <- filter(group, collection_year == x) %>% pull(sample)
+  data <- as.matrix(dist)[samples, samples]
+  data.frame(group = x, value = data[lower.tri(data)]) } )
+
+test_data <- pairwise_wilcox_test(data, value ~ group)
+write.xlsx(test_data, 'beta_div/beta_div.wilcox_test.collection_year.xlsx')
+
+kruskal_test <- kruskal_test(data, value ~ group)
+
+ggviolin(data, 'group', 'value', fill = 'group', legend = 'none', width = .8, 
+         xlab = '', ylab = '', title = paste0('collection_year (n=', nrow(group), ')'), 
+         palette = pald('set3'), trim = T,
+         subtitle = paste0('Kruskal-Wallis P = ', signif(kruskal_test$p, 3))) +
+  geom_boxplot(width = .25, outlier.shape = NA) +
+  rotate_x_text(30) +
+  theme(aspect.ratio = 1/2.5,
+        axis.line = element_blank(), 
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.background = element_rect(color = 'black', linewidth = .8),
+        axis.ticks.length = unit(1.5, 'mm'))
+ggsave('beta_div/beta_div.dist_violin.collection_year.pdf', width = 8, height = 4)
+
+p1 <- ggscatter(mutate(pcoa_data, collection_year = as.character(collection_year)) %>% 
+                  filter(collection_year >= 2012), 
+                'X1', 'X2', color = 'collection_year', legend = 'right', 
+                palette = pald('set3'), size = 1, title = 'collection_year',
+                xlab = 'PCoA1 (13.60%)', ylab = 'PCoA2 (9.93%)') + 
+  theme_test() +
+  theme(aspect.ratio = 1,
+        panel.border = element_rect(linewidth = .6),
+        axis.ticks.length = unit(1.5, 'mm'))
+p2 <- count(pcoa_data, collection_year) %>% 
+  filter(collection_year >= 2012) %>% 
+  arrange(desc(n)) %>% 
+  ggtexttable(theme = ttheme('light'))
+
+cowplot::plot_grid(p1, p2, rel_widths = c(.7, .3))
+ggsave('beta_div/beta_div.pcoa_plot.collection_year.pdf', width = 12, height = 6)
+
+#### beta div location_lv1 ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  dplyr::select(sample = run_ID, project_ID, seq_platform, seq_length, location_lv1) %>% 
+  na.omit() %>% 
+  filter(location_lv1 != 'Africa')
+
+data <- map_dfr(unique(group$location_lv1), \(x) {
+  samples <- filter(group, location_lv1 == x) %>% pull(sample)
+  data <- as.matrix(dist)[samples, samples]
+  data.frame(group = x, value = data[lower.tri(data)]) } )
+
+test_data <- pairwise_wilcox_test(data, value ~ group)
+write.xlsx(test_data, 'beta_div/beta_div.wilcox_test.location_lv1.xlsx')
+
+kruskal_test <- kruskal_test(data, value ~ group)
+
+ggviolin(data, 'group', 'value', fill = 'group', legend = 'none', width = .8, 
+         xlab = '', ylab = '', title = paste0('location_lv1 (n=', nrow(group), ')'), 
+         palette = pald('set3'), trim = T,
+         subtitle = paste0('Kruskal-Wallis P = ', signif(kruskal_test$p, 3))) +
+  geom_boxplot(width = .25, outlier.shape = NA) +
+  rotate_x_text(30) +
+  theme(aspect.ratio = 1,
+        axis.line = element_blank(), 
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.background = element_rect(color = 'black', linewidth = .8),
+        axis.ticks.length = unit(1.5, 'mm'))
+ggsave('beta_div/beta_div.dist_violin.location_lv1.pdf', width = 4, height = 4)
+
+p1 <- ggscatter(filter(pcoa_data, location_lv1 != 'Africa'), 
+                'X1', 'X2', color = 'location_lv1', legend = 'right', 
+                palette = pald('set3'), size = 1, title = 'location_lv0',
+                xlab = 'PCoA1 (13.60%)', ylab = 'PCoA2 (9.93%)') + 
+  theme_test() +
+  theme(aspect.ratio = 1,
+        panel.border = element_rect(linewidth = .6),
+        axis.ticks.length = unit(1.5, 'mm'))
+p2 <- count(pcoa_data, location_lv1) %>% 
+  filter(location_lv1 != 'Africa') %>% 
+  arrange(desc(n)) %>% 
+  ggtexttable(theme = ttheme('light'))
+
+cowplot::plot_grid(p1, p2, rel_widths = c(.7, .3))
+ggsave('beta_div/beta_div.pcoa_plot.location_lv1.pdf', width = 12, height = 6)
+
+#### beta div location_lv2 ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  dplyr::select(sample = run_ID, project_ID, seq_platform, seq_length, location_lv1, location_lv2) %>% 
+  na.omit()
+
+names <- count(group, location_lv2) %>% 
+  filter(n >= 20) %>% 
+  pull(location_lv2)
+
+group <- filter(group, location_lv2 %in% names)
+
+data <- map_dfr(unique(group$location_lv2), \(x) {
+  samples <- filter(group, location_lv2 == x) %>% pull(sample)
+  data <- as.matrix(dist)[samples, samples]
+  data.frame(group = x, value = data[lower.tri(data)]) } ) %>% 
+  left_join(dplyr::select(group, starts_with('location')) %>% distinct(),
+            by = c('group' = 'location_lv2')) %>% 
+  mutate(location_lv1 = as.factor(location_lv1)) %>% 
+  arrange(location_lv1)
+
+test_data <- pairwise_wilcox_test(data, value ~ group)
+write.xlsx(test_data, 'beta_div/beta_div.wilcox_test.location_lv2.xlsx')
+
+kruskal_test <- kruskal_test(data, value ~ group)
+
+ggviolin(data, 'group', 'value', fill = 'location_lv1', legend = 'none', width = .8, 
+         xlab = '', ylab = '', title = paste0('location_lv2 (n=', nrow(group), ')'), 
+         palette = pald('set3'), trim = T,
+         subtitle = paste0('Kruskal-Wallis P = ', signif(kruskal_test$p, 3))) +
+  geom_boxplot(width = .25, outlier.shape = NA) +
+  rotate_x_text(30) +
+  theme(aspect.ratio = 1/2.5,
+        axis.line = element_blank(), 
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.background = element_rect(color = 'black', linewidth = .8),
+        axis.ticks.length = unit(1.5, 'mm'))
+ggsave('beta_div/beta_div.dist_violin.location_lv2.pdf', width = 8, height = 4)
+
+p1 <- ggscatter(filter(pcoa_data, sample %in% group$sample), 
+                'X1', 'X2', color = 'location_lv2', legend = 'right', 
+                palette = pald('paired2'), size = 1, title = 'location_lv2',
+                xlab = 'PCoA1 (13.60%)', ylab = 'PCoA2 (9.93%)') + 
+  theme_test() +
+  theme(aspect.ratio = 1,
+        panel.border = element_rect(linewidth = .6),
+        axis.ticks.length = unit(1.5, 'mm'))
+p2 <- filter(pcoa_data, sample %in% group$sample) %>% 
+  count(location_lv2) %>% 
+  arrange(desc(n)) %>% 
+  ggtexttable(theme = ttheme('light'))
+
+cowplot::plot_grid(p1, p2, rel_widths = c(.7, .3))
+ggsave('beta_div/beta_div.pcoa_plot.location_lv2.pdf', width = 12, height = 6)
+
+#### adonis 2003 sample ####
+cluster <- read.delim('../enterotype_rmBatch/enterotype_g/PAM_3cluster.data.tsv')
+
+# 筛选信息全面的样本
+sub_group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  rename(sample = run_ID) %>% 
+  na.omit() %>% 
+  left_join(cluster, by = 'sample') %>% 
+  mutate(cluster = as.character(cluster))
+sub_profile <- readRDS('data/filtered_profile.t.f.rds')[sub_group$sample]
+# sub_dist <- vegdist(t(sub_profile), method = 'bray')
+# saveRDS(sub_dist, 'permanova/bray_dist_sub.rds')
+sub_dist <- readRDS('permanova/bray_dist_sub.rds')
+
+# 所有变量整体模型
+adonis <- adonis2(sub_dist ~ project_ID + seq_platform + seq_length + breed_lv1 + sex_lv1 +
+                    growth_stage_lv1 + region_lv2 + collection_year + location_lv1 + 
+                    location_lv2 + cluster, sub_group, permutations = 999)
+saveRDS(adonis, 'permanova/2003_samples.adonis.by_all.rds')
+adonis <- readRDS('permanova/2003_samples.adonis.by_all.rds')
+
+# 按照变量顺序解释模型
+adonis <- adonis2(sub_dist ~ project_ID + seq_platform + seq_length + breed_lv1 + sex_lv1 + 
+                    growth_stage_lv1 + region_lv2 + collection_year + location_lv1 + 
+                    location_lv2 + cluster, sub_group, permutations = 999, by = 'terms')
+saveRDS(adonis, 'permanova/2003_samples.adonis.by_terms.rds')
+
+adonis <- readRDS('permanova/2003_samples.adonis.by_terms.rds')
+data.frame(adonis) %>% 
+  rownames_to_column('name') %>% 
+write.xlsx('permanova/2003_samples.adonis.by_terms.xlsx')
+
+# 多变量联合模型，计算各变量的“边际效应”，即在控制其他变量的条件下，每个变量单独解释的变异量及其显著性。
+adonis <- adonis2(sub_dist ~ project_ID + seq_platform + seq_length + breed_lv1 + sex_lv1 + 
+                    growth_stage_lv1 + region_lv2 + collection_year + location_lv1 + 
+                    location_lv2 + cluster, sub_group, permutations = 999, by = 'margin')
+saveRDS(adonis, 'permanova/2003_samples.adonis.by_margin.rds')
+
+adonis <- readRDS('permanova/2003_samples.adonis.by_margin.rds')
+data.frame(adonis) %>% 
+  rownames_to_column('name') %>% 
+  write.xlsx('permanova/2003_samples.adonis.by_margin.xlsx')
+
+# 逐变量单独模型（循环计算每个变量）
+# 计算的每个变量的解释变异量和显著性都是“单因素模型”，无其他变量控制。
+# 优点：简单，避免变量间共线性问题，适合初步筛选重要变量。结果直观，易理解每个变量单独对距离矩阵的影响。
+# 缺点：不考虑其他变量的影响，不能区分变量间的混杂效应。可能高估某些变量的解释度，因为未控制其他因素。
+vars <- c('project_ID','seq_platform','seq_length','breed_lv1','breed_lv1','sex_lv1',
+          'growth_stage_lv1','region_lv1','region_lv2','collection_year',
+          'location_lv1', 'location_lv2', 'cluster')
+adonis <- map(vars, ~ adonis2(as.formula(paste0('sub_dist ~ ', .x)),
+                              sub_group, permutations = 999)) %>% set_names(vars)
+saveRDS(adonis, 'permanova/2003_samples.adonis.by_single.rds')
+
+adonis <- readRDS('permanova/2003_samples.adonis.by_single.rds')
+data <- map_df(vars, ~ data.frame(adonis[[.x]], row.names = NULL)[1,] %>% 
+                 add_column(name = .x, .before = 1)) %>% arrange(desc(R2))
+write.xlsx(data, 'permanova/2003_samples.adonis.by_single.xlsx')
+
+library(treemapify)
+plot_data <- read.xlsx('permanova/2003_samples.adonis.by_single.xlsx') %>% 
+  add_plab(by = 'Pr..F.') %>% 
+  mutate(label = paste0(name, ',\nR2=', round(R2, 3), ',', plab))
+
+ggplot(plot_data, aes(area = R2, fill = R2)) +
+  geom_treemap(color = '#ffffff', size = 1.5) +
+  geom_treemap_text(aes(label = label), color = 'black', place = 'centre', size = 8,
+                    min.size = 0) +
+  labs(title = 'Adonis analyses for each variable [n=2,003]') +
+  scale_fill_gradientn(colors = colorRampPalette(c('#08589e','#2b8cbe','#4eb3d3','#7bccc4',
+                                                   '#a8ddb5','#ccebc5','#f0f9e8'))(30)) +
+  theme_void() +
+  theme(aspect.ratio = 1,
+        plot.title = element_text(face = 'bold', hjust = .5))
+ggsave('permanova/2003_samples.adonis.by_single.pdf', width = 4, height = 3.5)
+
+#### disperse 2003 sample ####
+vars <- c('project_ID','seq_platform','seq_length','breed_lv1','breed_lv1','sex_lv1',
+          'growth_stage_lv1','region_lv1','region_lv2','collection_year',
+          'location_lv1', 'location_lv2', 'cluster')
+
+disperse <- map(vars, ~ {
+  .sub_group <- dplyr::select(sub_group, sample, group = all_of(.x)) %>% 
+    mutate(group = as.character(group))
+  calcu_betadisper(dist = sub_dist, group = .sub_group, x_text_angle = 90,
+                   title = .x, aspect_ratio = NULL)  }) %>% 
+  set_names(vars)
+saveRDS(disperse, 'permanova/2003_samples.disperse.by_single.rds')
+
+disperse <- readRDS('permanova/2003_samples.disperse.by_single.rds')
+data <- map2_dfr(disperse, names(disperse), ~
+                   data.frame(.x$anova, row.names = NULL)[1,] %>% 
+                   add_column(name = .y, .before = 1))
+write.xlsx(data, 'permanova/2003_samples.disperse.by_single.xlsx')
+
+plot_data <- read.xlsx('permanova/2003_samples.disperse.by_single.xlsx') %>% 
+  add_plab(by = 'Pr..F.') %>% 
+  mutate(label = paste0(name, ',\nF-value=', round(F.value, 3), ',', plab))
+
+ggplot(plot_data, aes(area = F.value, fill = F.value)) +
+  geom_treemap(color = '#ffffff', size = 1.5) +
+  geom_treemap_text(aes(label = label), color = 'black', place = 'centre', size = 8,
+                    min.size = 0) +
+  labs(title = 'Disperse analyses for each variable [n=2,003]') +
+  scale_fill_gradientn(colors = colorRampPalette(c('#08589e','#2b8cbe','#4eb3d3','#7bccc4',
+                                                   '#a8ddb5','#ccebc5','#f0f9e8'))(30)) +
+  theme_void() +
+  theme(aspect.ratio = 1,
+        plot.title = element_text(face = 'bold', hjust = .5))
+ggsave('permanova/2003_samples.disperse.by_single.pdf', width = 4, height = 3.5)
+
+#### adonis all sample ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  rename(sample = run_ID) %>% 
+  filter(sample %in% colnames(profile)) %>% 
+  left_join(cluster, by = 'sample') %>% 
+  mutate(cluster = as.character(cluster))
+
+dist <- readRDS('beta_div/bray_dist.rds')
+
+vars <- c('project_ID','seq_platform','seq_length','breed_lv1','breed_lv1','sex_lv1',
+          'growth_stage_lv1','region_lv1','region_lv2','collection_year',
+          'location_lv1', 'location_lv2', 'cluster')
+
+adonis <- map(vars, ~ { 
+  sub_group <- group[!is.na(group[[.x]]),]
+  sub_dist <- as.matrix(dist)[sub_group$sample, sub_group$sample]
+  adonis2(as.formula(paste0('sub_dist ~ ', .x)), sub_group, permutations = 999) }) %>% 
+  set_names(vars)
+saveRDS(adonis, 'permanova/all_sample.adonis.by_single.rds')
+
+adonis <- readRDS('permanova/all_sample.adonis.by_single.rds')
+data <- map2_dfr(adonis, names(adonis), ~
+                   data.frame(.x, row.names = NULL)[1,] %>% 
+                   add_column(name = .y, .before = 1))
+write.xlsx(data, 'permanova/all_sample.adonis.by_single.xlsx')
+
+plot_data <- read.xlsx('permanova/all_sample.adonis.by_single.xlsx') %>% 
+  add_plab(by = 'Pr..F.') %>% 
+  mutate(label = paste0(name, ',\nR2=', round(R2, 3), ',', plab))
+
+ggplot(plot_data, aes(area = R2, fill = R2)) +
+  geom_treemap(color = '#ffffff', size = 1.5) +
+  geom_treemap_text(aes(label = label), color = 'black', place = 'centre', size = 8,
+                    min.size = 0) +
+  labs(title = 'Adonis analyses for each variable [all samples]') +
+  scale_fill_gradientn(colors = colorRampPalette(c('#08589e','#2b8cbe','#4eb3d3','#7bccc4',
+                                                   '#a8ddb5','#ccebc5','#f0f9e8'))(30)) +
+  theme_void() +
+  theme(aspect.ratio = 1,
+        plot.title = element_text(face = 'bold', hjust = .5))
+ggsave('permanova/all_sample.adonis.by_single.pdf', width = 4, height = 3.5)
+
+#### disperse all sample ####
+vars <- c('project_ID','seq_platform','seq_length','breed_lv1','breed_lv1','sex_lv1',
+          'growth_stage_lv1','region_lv1','region_lv2','collection_year',
+          'location_lv1', 'location_lv2', 'cluster')
+
+disperse <- map(vars, ~ {
+  sub_group <- group[!is.na(group[[.x]]),] %>% 
+    dplyr::select(sample, group = all_of(.x))
+  sub_dist <- as.matrix(dist)[sub_group$sample, sub_group$sample]
+  calcu_betadisper(dist = as.dist(sub_dist), group = sub_group, x_text_angle = 90,
+                   title = .x, aspect_ratio = NULL)  }) %>% 
+  set_names(vars)
+saveRDS(disperse, 'permanova/all_sample.disperse.by_single.rds')
+
+data <- map2_dfr(disperse, names(disperse), ~
+                   data.frame(.x$anova, row.names = NULL)[1,] %>% 
+                   add_column(name = .y, .before = 1))
+write.xlsx(data, 'permanova/all_sample.disperse.by_single.xlsx')
+
+plot_data <- read.xlsx('permanova/all_sample.disperse.by_single.xlsx') %>% 
+  add_plab(by = 'Pr..F.') %>% 
+  mutate(label = paste0(name, ',\nF-value=', round(F.value, 3), ',', plab))
+
+ggplot(plot_data, aes(area = F.value, fill = F.value)) +
+  geom_treemap(color = '#ffffff', size = 1.5) +
+  geom_treemap_text(aes(label = label), color = 'black', place = 'centre', size = 8,
+                    min.size = 0) +
+  labs(title = 'Disperse analyses for each variable [all samples]') +
+  scale_fill_gradientn(colors = colorRampPalette(c('#08589e','#2b8cbe','#4eb3d3','#7bccc4',
+                                                   '#a8ddb5','#ccebc5','#f0f9e8'))(30)) +
+  theme_void() +
+  theme(aspect.ratio = 1,
+        plot.title = element_text(face = 'bold', hjust = .5))
+ggsave('permanova/all_sample.disperse.by_single.pdf', width = 4, height = 3.5)
+```

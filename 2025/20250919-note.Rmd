@@ -1,0 +1,405 @@
+---
+title: "RNASeq STFS Mus BMDM LiJL"
+author: "Jinxin Meng"
+date: "2025-09-19"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## pipeline
+
+```{sh}
+cat raw_fq.filelist | parallel -j 5 --colsep="\t" run_fastp.sh {2},{3} clean_fq/{1}
+cat clean_fq.filelist | parallel -j 5 --colsep="\t" run_hisat2.sh {2},{3} /data/database/hisat2/grcm39_tran-r110/grcm39 hisat2/{1}
+cut -f1 clean_fq.filelist | parallel -j 5 stringtie -p 24 -o stringtie/{}.gtf -e -A stringtie/{}.tsv -G /data/database/hisat2/grcm39_tran-r110/Mus_musculus.GRCm39.110.gtf hisat2/{}.sort.bam
+get_stringtie_Count.py3 -i stringtie.filelist -g gene.rc.gz -l 143
+get_stringtie_FPKM.py3 -i stringtie.filelist -g gene.fpkm.gz -l 143
+```
+
+## python scripts
+
+```{py}
+#### get_stringtie_Count.py3 ####
+#!/data/software/miniconda3/envs/jinxin/bin/python
+# Jinxin Meng, mengjx855@163.com
+# created date: 2025-09-27, 11:04:13
+# modified date: 2025-09-27, 20:09:05
+
+import argparse, sys, os, re
+import pandas as pd
+from math import ceil
+from collections import defaultdict
+
+RE_GENE_ID = re.compile('gene_id "([^"]+)"')
+RE_GENE_NAME = re.compile('gene_name "([^"]+)"')
+RE_TRANSCRIPT_ID = re.compile('transcript_id "([^"]+)"')
+RE_COVERAGE = re.compile(r'cov "([\-\+\d\.]+)"')
+RE_GFILE = re.compile('\-G\s*(\S+)')
+
+def parse_arguments():
+    '''    Re-writing prepDE.py3 provided by stringtie (v3.0.0), aimed at simplify codes and fix some bug. 
+    Generates two CSV files containing the count matrices for genes and transcripts, using the coverage values found in the output of `stringtie -e`' '''
+    parser = argparse.ArgumentParser(description=parse_arguments.__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('-i', type=str, help='a text file with sample ID and path to its gtf-file')
+    parser.add_argument('-d', type=str, default=None, help='a folder containing all gtf-files (default: ./)')
+    parser.add_argument('-o', type=str, required=True, default='gene_readscount.tsv', help='where to output the gene reads count matrix (default: gene_readscount.tsv)')
+    parser.add_argument('-t', type=str, default=None, help='where to output the transcript reads count matrix (default: None)' )
+    parser.add_argument('-l', type=int, default=150, help='the average read length (default: 150)') 
+    parser.add_argument('-p', type=str, default='\.gtf(\.gz)?$', help='a regular expression that selects the gft files in folder (default: \.gtf(\.gz)?$)')
+    parser.add_argument('-q', action='store_true', help='suppress message (default: False)')
+    if len(sys.argv) == 1:
+        parser.print_help()
+        parser.exit()
+    return parser.parse_args()
+
+def collect_samples(file, folder, pattern):
+    samples = []
+    if folder == None and os.path.isfile(file):
+        with open(file, 'r') as f:
+            for row in f:
+                if row[0] != '#':
+                    parts = tuple(row.strip().split(None,2))
+                if (len(parts) != 2):
+                    sys.exit(f'Error: row should have a sample ID and a file path:\n{row.strip()}')
+                if parts[0] in samples:
+                    sys.exit(f'Error: non-unique sample ID {parts[0]}')
+                if not os.path.isfile(parts[1]):
+                    sys.exit(f'Error: gtf file not found {parts[1]}')
+                samples.append(parts)
+    else:
+        if not os.path.isdir(folder):
+            sys.exit(f'Error: directory {folder} not found!')
+        for file in os.listdir(folder):
+            if re.search(pattern, file):
+                sample = re.sub(pattern, '', os.path.basename(file))
+                file = folder + file if re.search(r'/', folder) else folder + '/' + file
+                samples.append((sample, file))
+    
+    if len(samples) == 0:
+        sys.exit(f'Error: no GTF files found !')
+
+    samples.sort()
+
+    return samples
+
+def is_transcript(x):
+  return len(x) > 2 and x[2] == 'transcript'
+
+def get_geneID(x):
+    transcript_id = RE_TRANSCRIPT_ID.search(x).group(1)
+    gene_id = RE_GENE_ID.search(x)
+    gene_name = RE_GENE_NAME.search(x)
+    if gene_id:
+        if gene_name:
+            return gene_id.group(1) + '|' + gene_name.group(1)
+        else:
+            return gene_id.group(1)
+    return transcript_id
+
+def get_coverage(x):
+    re_coverage = RE_COVERAGE.search(x)
+    if re_coverage:
+        value = float(re_coverage.group(1))
+        if value < 0.0:
+            value = 0.0
+        return value
+    return 0.0
+
+def extract_profile(samples, read_length, quiet):
+    geneIDs = defaultdict(str)
+    gene_dict = defaultdict(lambda: defaultdict(lambda: 0)) # key=gene, value=dict with key=sample, value=summed_counts
+    transcript_dict = defaultdict(lambda: defaultdict(lambda: 0))
+    guidesFile = '' # file given with -G for the 1st sample
+
+    for index, sample in enumerate(samples):
+        if not quiet:
+            print(f'>>> processing sample {sample[0]} ({index + 1}/{len(samples)}) <<<\r', end='')
+
+        with open(sample[1]) as f:
+            transcript_length = 0
+
+            for row_index, row in enumerate(f):
+                if row.startswith('#'):
+
+                    # -e / -G within stringtie.
+                    if row_index == 0:
+                        if not re.search(r'-e', row):
+                            sys.exit(f'Error: sample file {sample[0]} was not generated with -e option!')
+
+                        re_gfile = RE_GFILE.search(row)
+                        if re_gfile:
+                            gfile = re_gfile.group(1)
+                            if guidesFile:
+                                if gfile != guidesFile:
+                                    print(f'Warning: sample file {sample[1]} generated with a different -G file ({gfile}) than the first sample ({guidesFile})')
+                            else:
+                                guidesFile = gfile
+                        else:
+                            sys.exit(f'Error: sample {sample[1]} was not processed with -G option!') 
+                    continue
+
+                parts = row.strip().split('\t')
+
+                if parts[2] == 'transcript':
+                    if transcript_length > 0:
+                        transcript_dict[transcript_id][sample[0]] = int(ceil(coverage * transcript_length / read_length))
+                    transcript_id = RE_TRANSCRIPT_ID.search(parts[8]).group(1)
+                    gene_id = get_geneID(parts[8])
+                    coverage = get_coverage(parts[8])
+                    transcript_length = 0
+                    geneIDs[transcript_id] = gene_id
+
+                if parts[2] == 'exon':
+                    transcript_length += int(parts[4]) - int(parts[3]) + 1
+            
+            transcript_dict[transcript_id][sample[0]] = int(ceil(coverage * transcript_length / read_length))
+
+        for k, v in transcript_dict.items():
+            try:
+                gene_dict[geneIDs[k]][sample[0]] += v[sample[0]]
+            except KeyError:
+                print(f'Error: could not locate transcript {k} entry for sample {sample[0]}')
+                raise
+
+    return gene_dict, transcript_dict
+
+
+def main():
+    args = parse_arguments()
+    samples = collect_samples(args.i, args.d, args.p)
+    gene_dict, transcript_dict = extract_profile(samples, args.l, args.q)
+    
+    if not args.q:
+        print('\n>>> Save stringtie profile results. <<<')
+
+    pd.DataFrame(gene_dict).fillna(0).T.to_csv(args.o, sep='\t', index_label='name', float_format='%.0f')
+    if args.t != None:
+        pd.DataFrame(transcript_dict).fillna(0).T.to_csv(args.t, sep='\t', index_label='name', float_format='%.0f')
+
+if __name__ == '__main__':
+    main()
+```
+
+## RNASeq downstream analysis
+
+```{R}
+#### data preprocess ####
+rc <- data.table::fread('../gene.rc.gz', check.names = F) %>% 
+  mutate(gene_id = stringr::str_split_i(name, '\\|', 1),
+         gene_name = stringr::str_split_i(name, '\\|', 2), .after = 'name') %>% 
+  filter(!is.na(gene_name)) %>% 
+  dplyr::select(-name, -gene_id) %>% 
+  aggregate(. ~ gene_name, ., sum) %>% 
+  column_to_rownames('gene_name')
+rc <- rc[rowSums(rc > 3) > 10, ]
+write.table(rownames_to_column(rc, 'name'), 'rc.tsv', sep = '\t', quote = F, row.names = F)
+
+fpkm <- data.table::fread('../gene.fpkm.gz', check.names = F) %>% 
+  mutate(gene_id = stringr::str_split_i(name, '\\|', 1),
+         gene_name = stringr::str_split_i(name, '\\|', 2), .after = 'name') %>% 
+  filter(!is.na(gene_name)) %>% 
+  dplyr::select(-name, -gene_id) %>% 
+  aggregate(. ~ gene_name, ., sum) %>% 
+  filter(gene_name %in% rownames(rc)) %>% 
+  column_to_rownames('gene_name')
+write.table(rownames_to_column(fpkm, 'name'), 'fpkm.tsv', sep = '\t', quote = F, row.names = F)
+
+#### info ####
+group_level <- c('b6_1MT_24h','b6_KYN_24h','b6_Mock_24h','b6_SFTSV_24h','b6_SFTSV+1MT_24h',
+                 'b6_SFTSV+KYN_24h','Ido1_Mock_24h','Ido1_SFTSV_24h',
+                 'b6_1MT_48h','b6_KYN_48h','b6_Mock_48h','b6_SFTSV_48h','b6_SFTSV+1MT_48h',
+                 'b6_SFTSV+KYN_48h','Ido1_Mock_48h','Ido1_SFTSV_48h',
+                 'b6_1MT_4h','b6_LPS_4h','b6_LPS+1MT_4h','b6_Mock_4h','Ido1_LPS_4h',
+                 'Ido1_Mock_4h')
+
+group <- read.xlsx('group.xlsx', sheet = 'group')
+rc <- data.table::fread('rc.tsv', check.names = F) %>% 
+  column_to_rownames('name')
+fpkm <- data.table::fread('fpkm.tsv', check.names = F) %>% 
+  column_to_rownames('name')
+
+#### PCA ####
+source('/data/mengjx/R_proj/R_func/plot_PCA.R')
+source('/data/mengjx/R_proj/R_func/palette.R')
+
+plots <- map(c('4h', '24h', '48h'), ~ {
+  .data <- dplyr::select(fpkm, contains(paste0('_', .x)))
+  .vars <- apply(.data, 1, sd) %>% sort(decreasing = T) %>% head(500)
+  plot_PCA(.data[names(.vars),], group, label_size = 3, show_grid = T, show_line = F, 
+           group_level = group_level, title = paste0(.x, ' PCA (top 500 high variable gene)')) } )
+cowplot::plot_grid(plotlist = plots, align = 'v', ncol = 1)
+ggsave('PCA.pdf', width = 6, height = 10)
+
+#### difference ####
+metadata <- data.frame(row.names = colnames(rc)) %>%
+  mutate(group = group$group[match(rownames(.), group$sample)],
+         group = factor(group, group_level))
+
+dds <- DESeqDataSetFromMatrix(countData = rc, colData = metadata, design = ~ group)
+des <- DESeq(dds)
+
+comparisons <- read.xlsx('group.xlsx', sheet = 'comparison')
+comparisons <- map2(comparisons$group1, comparisons$group2, ~ c(.x, .y)) %>% 
+  set_names(comparisons$name)
+
+difference <- map(
+  comparisons, ~
+    data.frame(results(des, contrast = c('group', .x))) %>%
+    rownames_to_column('name') %>%
+    filter(!is.na(padj)) %>% 
+    mutate(enriched = ifelse(log2FoldChange > 1 & padj < 0.05, .x[1], 
+                             ifelse(log2FoldChange < -1 & padj < 0.05,
+                                    .x[2], 'none')) )  ) %>% 
+  set_names(names(comparisons))
+
+saveRDS(difference, 'difference.rds')
+
+for (x in c('4h', '24h', '48h')) {
+  .difference <- difference[grepl(paste0('_', x), names(difference))]
+  names(.difference) <- gsub(paste0('_', x), '', names(.difference))
+  write.xlsx(.difference, paste0('difference.', x, '.xlsx'))
+  }
+
+data <- map2_dfr(names(comparisons), comparisons, ~ 
+                   data.frame(comparison = .x,
+                              up = sum(difference[[.x]]$enriched == .y[1]), 
+                              down = sum(difference[[.x]]$enriched == .y[2]),
+                              none = sum(difference[[.x]]$enriched == 'none')) )
+
+ggtexttable(data, theme = ttheme('light'))
+ggsave('difference.stats.pdf', width = 6, height = 8)
+
+#### ORA 富集分析 KEGG ####
+library(org.Mm.eg.db)
+gene_info <- AnnotationDbi::select(org.Mm.eg.db, keys = rownames(rc), 
+                                   keytype = 'SYMBOL', columns = c('ENTREZID'))
+
+eKEGG <- map(difference, ~ filter(.x, enriched != 'none') %>% 
+               mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>% 
+               pull(ENTREZID) %>% 
+               enrichKEGG(organism = 'mmu', pvalueCutoff = .5, qvalueCutoff = .5) %>% 
+               data.frame())
+eKEGG <- keep(eKEGG, ~ nrow(.x) != 0)
+saveRDS(eKEGG, 'enrichKEGG.all.rds')
+
+for (x in c('4h', '24h', '48h')) {
+  .eKEGG <- eKEGG[grepl(paste0('_', x), names(eKEGG))]
+  names(.eKEGG) <- gsub(paste0('_', x), '', names(.eKEGG))
+  write.xlsx(.eKEGG, paste0('enrichKEGG.', x, '.all.xlsx'))
+}
+
+eKEGG <- map2(difference, map_vec(comparisons, ~ .x[1]), ~ 
+                filter(.x, enriched == .y) %>%
+                mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>% 
+                pull(ENTREZID) %>% 
+                enrichKEGG(organism = 'mmu', pvalueCutoff = .5, qvalueCutoff = .5) %>% 
+                data.frame())
+eKEGG <- keep(eKEGG, ~ nrow(.x) != 0)
+saveRDS(eKEGG, 'enrichKEGG_up.rds')
+
+for (x in c('4h', '24h', '48h')) {
+  .eKEGG <- eKEGG[grepl(paste0('_', x), names(eKEGG))]
+  names(.eKEGG) <- gsub(paste0('_', x), '', names(.eKEGG))
+  write.xlsx(.eKEGG, paste0('enrichKEGG.', x, '.up.xlsx'))
+}
+
+eKEGG <- map2(difference, map_vec(comparisons, ~ .x[2]), ~ 
+                filter(.x, enriched == .y) %>%
+                mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>% 
+                pull(ENTREZID) %>% 
+                enrichKEGG(organism = 'mmu', pvalueCutoff = 1) %>% 
+                data.frame())
+eKEGG <- keep(eKEGG, ~ nrow(.x) != 0)
+saveRDS(eKEGG, 'enrichKEGG_down.rds')
+
+for (x in c('4h', '24h', '48h')) {
+  .eKEGG <- eKEGG[grepl(paste0('_', x), names(eKEGG))]
+  names(.eKEGG) <- gsub(paste0('_', x), '', names(.eKEGG))
+  write.xlsx(.eKEGG, paste0('enrichKEGG.', x, '.down.xlsx'))
+}
+
+#### ORA 富集分析 GO ####
+eGO <- map(difference, ~ filter(.x, enriched != 'none') %>% 
+             pull(name) %>% 
+             enrichGO('org.Mm.eg.db', keyType = 'SYMBOL', ont = 'ALL',
+                      pvalueCutoff = .5, qvalueCutoff = .5) %>% 
+             data.frame())
+eGO <- keep(eGO, ~ nrow(.x) != 0)
+saveRDS(eGO, 'enrichGO.all.rds')
+
+for (x in c('4h', '24h', '48h')) {
+  .eGO <- eGO[grepl(paste0('_', x), names(eGO))]
+  names(.eGO) <- gsub(paste0('_', x), '', names(.eGO))
+  write.xlsx(.eGO, paste0('enrichGO.', x, '.all.xlsx'))
+}
+
+eGO <- map2(difference, map_vec(comparisons, ~ .x[1]), ~
+              filter(.x, enriched == .y) %>% 
+              pull(name) %>% 
+              enrichGO('org.Mm.eg.db', keyType = 'SYMBOL', ont = 'ALL',
+                       pvalueCutoff = .5, qvalueCutoff = .5) %>% 
+               data.frame() )
+eGO <- keep(eGO, ~ nrow(.x) != 0)
+saveRDS(eGO, 'enrichGO.up.rds')
+
+for (x in c('4h', '24h', '48h')) {
+  .eGO <- eGO[grepl(paste0('_', x), names(eGO))]
+  names(.eGO) <- gsub(paste0('_', x), '', names(.eGO))
+  write.xlsx(.eGO, paste0('enrichGO.', x, '.up.xlsx'))
+}
+
+eGO <- map2(difference, map_vec(comparisons, ~ .x[2]), ~
+              filter(.x, enriched == .y) %>% 
+              pull(name) %>% 
+              enrichGO('org.Mm.eg.db', keyType = 'SYMBOL', ont = 'ALL',
+                       pvalueCutoff = .5, qvalueCutoff = .5) %>% 
+              data.frame() )
+eGO <- keep(eGO, ~ nrow(.x) != 0)
+saveRDS(eGO, 'enrichGO.down.rds')
+
+for (x in c('4h', '24h', '48h')) {
+  .eGO <- eGO[grepl(paste0('_', x), names(eGO))]
+  names(.eGO) <- gsub(paste0('_', x), '', names(.eGO))
+  write.xlsx(.eGO, paste0('enrichGO.', x, '.down.xlsx'))
+}
+
+#### GSEA 富集分析 KEGG ####
+difference <- readRDS('difference.rds')
+
+gseKEGG <- map(difference, ~
+                 left_join(.x, gene_info, by = c('name' = 'SYMBOL')) %>%
+                 filter(!is.na(ENTREZID)) %>% 
+                 pull(log2FoldChange, name = ENTREZID) %>%
+                 sort(decreasing = T) %>% 
+                 gseKEGG(organism = 'mmu', pvalueCutoff = .5) %>% 
+                 data.frame())
+gseKEGG <- keep(gseKEGG, ~ nrow(.x) != 0)
+saveRDS(gseKEGG, 'gseKEGG.rds')
+
+for (x in c('4h', '24h', '48h')) {
+  .gseKEGG <- gseKEGG[grepl(paste0('_', x), names(gseKEGG))]
+  names(.gseKEGG) <- gsub(paste0('_', x), '', names(.gseKEGG))
+  write.xlsx(.gseKEGG, paste0('gseKEGG.', x, '.xlsx'))
+}
+
+#### GSEA 富集分析 GO ####
+gseGO <- map(difference, ~
+               pull(.x, log2FoldChange, name = name) %>%
+               sort(decreasing = T) %>% 
+               gseGO('org.Mm.eg.db', keyType = 'SYMBOL', pvalueCutoff = .5, ont = 'ALL') %>% 
+               data.frame())
+gseGO <- keep(gseGO, ~ nrow(.x) != 0)
+saveRDS(gseGO, 'gseGO.rds')
+
+for (x in c('4h', '24h', '48h')) {
+  .gseGO <- gseGO[grepl(paste0('_', x), names(gseGO))]
+  names(.gseGO) <- gsub(paste0('_', x), '', names(.gseGO))
+  write.xlsx(.gseGO, paste0('gseGO.', x, '.xlsx'))
+}
+```

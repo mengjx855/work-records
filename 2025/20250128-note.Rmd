@@ -1,0 +1,26 @@
+---
+title: "Clostridium sporogenes (strain ATCC 3584) and Clostridium sporogenes ATCC 15579 genome analyses"
+author: "Jinxin Meng"
+date: "2025-01-28"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## pipeline
+
+```{bash}
+datasets download genome accession GCF_900187175.1 --include genome,protein,cds,gff3
+datasets download genome accession GCF_000190535.1 --include genome,protein,cds,gff3
+
+makeblastdb -in Csp.key_genes.faa -out Csp.key_genes.faa -dbtype prot
+makeblastdb -in Csp.key_genes.ffn -out Csp.key_genes.ffn -dbtype nucl
+blastn -query genome_Osp/GCF_000190535.1.ffn -db genome_Csp/Csp.key_genes.ffn -evalue 1e-5 -max_target_seqs 5 -num_threads 10 -outfmt 6 -out GCF_000190535.1.btn.m8
+blastp -query genome_Osp/GCF_000190535.1.faa -db genome_Csp/Csp.key_genes.faa -evalue 1e-5 -max_target_seqs 5 -num_threads 10 -outfmt 6 -out GCF_000190535.1.btp.m8
+blastx -query genome_Osp/GCF_000190535.1.ffn -db genome_Csp/Csp.key_genes.faa -evalue 1e-5 -max_target_seqs 5 -num_threads 10 -outfmt 6 -out GCF_000190535.1.btx.m8
+```

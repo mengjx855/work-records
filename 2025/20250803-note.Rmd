@@ -1,0 +1,596 @@
+---
+title: "Pig gut core-microbiota analysis - remove batch effect"
+author: "Jinxin Meng"
+date: "2025-08-03"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## data preprocess 
+```{R}
+#### world map ####
+library(ggmap)
+
+metadata <- read.xlsx('../sample_info/metadata.xlsx')
+
+count <- dplyr::count(metadata, location_lv2) %>% 
+  mutate(label = cut(n, c(0, 10, 100, 1000, 3000),
+                     c('<100', '100~500', '500~1000', '>1000')))
+
+map_data <- map_data('world') %>%
+  left_join(count, by = c('region' = 'location_lv2'))
+
+ggplot() +
+  geom_map(aes(long, lat, map_id = region, fill = label), map_data,
+           map = map_data, color = '#ffffff', linewidth = .1) +
+  scale_fill_manual(values = c('#edf8b1','#c7e9b4','#7fcdbb','#41b6c4'),
+                    na.value = 'grey83') +
+  scale_x_continuous(n.breaks = 10) +
+  scale_y_continuous(n.breaks = 10) +
+  coord_map(xlim = c(-200, 200)) +
+  theme_light() +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        axis.ticks = element_line(color = '#000000'),
+        panel.border = element_rect(color = '#000000', fill = 'transparent',
+                                    linewidth = .5))
+ggsave('preprocess/map_whole.sample_size.pdf', width = 8, height = 6)
+
+#### variable table ####
+data <- data.frame(a = character(), b = character(), c = character(), d = character())
+data <- data %>%
+  add_row(a = 'Project', b = '93', c = '6,587', d = 'Random') %>%
+  add_row(a = 'Sequence platform', b = '11', c = '6,587', d = 'Random') %>%
+  add_row(a = 'Sequence length', b = '4', c = '6,574', d = 'Random') %>%
+  add_row(a = 'Pig breed', b = '62', c = '4,904', d = 'Fixed') %>%
+  add_row(a = 'Pig sex', b = '2', c = '3,372', d = 'Fixed') %>%
+  add_row(a = 'Pig growth stage (age)', b = '8', c = '4,574', d = 'Fixed') %>%
+  add_row(a = 'Pig weight / kg', b = 'Continuous', c = '732', d = 'Not included') %>%
+  add_row(a = 'Collection region', b = '8', c = '6,490', d = 'Fixed') %>%
+  add_row(a = 'Collection year', b = '18', c = '6,165', d = 'Fixed') %>%
+  add_row(a = 'Location (country)', b = '21', c = '6,587', d = 'Fixed') %>%
+  add_row(a = 'Pig condition', b = '2', c = '6,587', d = 'Not included') %>%
+  add_row(a = 'Use antibiotics', b = '2', c = '2,803', d = 'Not included') %>%
+  add_row(a = 'Infection', b = '2', c = '6,587', d = 'Not included') %>%
+  add_row(a = 'Infection type', b = '3', c = '6,587', d = 'Not included')
+data <- rename_with(data, ~ c('Variable name', '# of level', '# of sample', 'Effect types'))
+ggtexttable(data, rows = NULL, theme = ttheme('light'))
+ggsave('preprocess/table.pdf', width = 6, height = 6)
+
+#### sequence content stats ####
+data <- read.delim('../pipeline/kraken2/kraken2.seqs.stats.tsv') %>%
+  mutate(total_reads = ifelse(total_reads > 2.5e+8, 2.5e+8, total_reads),
+         total_bases = ifelse(total_bases > 40000, 40000, total_bases))
+# reads
+p1 <- gghistogram(data, 'total_reads', bins = 100, fill = '#7fcdbb', color = NA,
+                  xlab = 'Total sequences per sample', ylab = 'Count of samples',
+                  add = 'median', add.params = list(linetype = 'longdash', color = '#41b6c4')) +
+  scale_x_continuous(expand = c(.01, 0)) +
+  scale_y_continuous(expand = c(.02, 0)) +
+  theme(aspect.ratio = 2/3,
+        axis.ticks.length = unit(2, 'mm')) +
+  annotate('text', x = 56302508, y = 300, label = 'median: 56302508')
+p2 <- gghistogram(data, 'total_bases', bins = 100, fill = '#7fcdbb', color = NA,
+                  xlab = 'Total bases per sample (Mbp)', ylab = 'Count of samples',
+                  add = 'median', add.params = list(linetype = 'longdash', color = '#41b6c4')) +
+  scale_x_continuous(expand = c(.01, 0)) +
+  scale_y_continuous(expand = c(.02, 0)) +
+  theme(aspect.ratio = 2/3,
+        axis.ticks.length = unit(2, 'mm')) +
+  annotate('text', x = 7930.085, y = 300, label = 'median: 7930.085')
+cowplot::plot_grid(p1, p2, align = 'h')
+ggsave('preprocess/seq_stat.histogram.pdf', width = 10, height = 4)
+
+p1 <- ggviolin(data, 1, y = 'total_reads', width = .5, fill = '#7fcdbb', xlab = '',
+               rotate = T, trim = T) +
+  geom_boxplot(width = .2, outlier.shape = NA) +
+  scale_y_continuous(breaks = seq(0, 2.5e+8, .5e+8)) +
+  theme(aspect.ratio = 1/10,
+        axis.ticks.length = unit(2, 'mm'))
+p2 <- ggviolin(data, 1, y = 'total_bases', width = .5, fill = '#7fcdbb', xlab = '',
+               rotate = T, trim = T) +
+  geom_boxplot(width = .2, outlier.shape = NA) +
+  theme(aspect.ratio = 1/10,
+        axis.ticks.length = unit(2, 'mm'))
+cowplot::plot_grid(p1, p2, align = 'h')
+ggsave('preprocess/seq_stat.violin.pdf', width = 10, height = 4)
+
+#### data filter ####
+# 按照测序 reads > 10M 进行过滤，5662个样本满足要求
+data <- read.delim('../pipeline/kraken2/kraken2.seqs.stats.tsv') %>%
+  mutate(total_reads = ifelse(total_reads > 2.5e+8, 2.5e+8, total_reads),
+         total_bases = ifelse(total_bases > 40000, 40000, total_bases))
+
+filtered_data <- filter(data, total_reads > 1e7)
+
+# 按照样本过滤profile [phylum/family/genus/species/strain]
+profile <- read.delim('../pipeline/kraken2/kraken2.t.profile.gz', row.names = 1)
+
+filtered_profile <- dplyr::select(profile, all_of(filtered_data$sample)) %>% 
+  filter(rowSums(.) != 0)
+
+saveRDS(filtered_profile, 'data/filtered_profile.t.rds')
+
+rownames_to_column(filtered_profile, 'name') %>% 
+  write.table('data/filtered_profile.t.tsv', sep = '\t', row.names = F, quote = F)
+
+# 按照样本过滤，最低丰度 0.01%=0.0001 判断菌株或者菌是否存在于某个样本中 [species/strain]
+profile <- readRDS('data/filtered_profile.t.rds')
+
+filtered_profile <- apply(profile, 2, \(x) ifelse(x <= 0.0001, 0, x)) %>% 
+  data.frame() %>% 
+  filter(rowSums(.) != 0)
+
+saveRDS(filtered_profile, 'data/filtered_profile.t.f.rds')
+
+rownames_to_column(filtered_profile, 'name') %>% 
+  write.table('data/filtered_profile.t.f.tsv', sep = '\t', row.names = F, quote = F)
+
+# metadata 过滤
+metadata <- read.xlsx('../sample_info/metadata.xlsx')
+
+filtered_metadata <- read.xlsx('../sample_info/metadata.xlsx') %>%
+  filter(run_ID %in% filtered_data$sample) %>%
+  rename(sample = run_ID) %>%
+  relocate(sample)
+
+saveRDS(filtered_metadata, 'data/filtered_metadata.rds')
+
+write.table(filtered_metadata, 'data/filtered_metadata.tsv', sep = '\t', row.names = F, quote = F)
+
+#### remove batch effect 5662-sample ####
+### genus Combat.withoutCov | transCLR -> Combat.withoutCov -> exp -> transRA
+library(sva)
+source('/data/mengjx/R_proj/R_func/profile_process.R')
+
+profile <- readRDS('data/filtered_profile.g.rds') %>% 
+  profile_transCLR(use_half_minimum = F)
+
+group <- readRDS('data/filtered_metadata.rds') %>% 
+  arrange(match(sample, colnames(profile))) %>% 
+  map_df(~ ifelse(is.na(.x), 'missing', .x))
+
+profile_rmBatch <- ComBat(profile, batch = group$project_ID,
+                          par.prior = TRUE, prior.plots = FALSE) %>% 
+  data.frame(check.names = F)
+
+profile_rmBatch <- exp(profile_rmBatch) %>% 
+  profile_transRA()
+
+write.table(rownames_to_column(profile_rmBatch, 'name'), 
+            'data/filtered_profile.g.ComBat.withoutCov.tsv',
+            sep = '\t', row.names = F, quote = F)
+
+
+### genus Combat.withCov | transCLR -> Combat.withCov -> exp -> transRA
+profile <- readRDS('data/filtered_profile.g.rds') %>% 
+  profile_transCLR(use_half_minimum = F)
+
+group <- readRDS('data/filtered_metadata.rds') %>% 
+  arrange(match(sample, colnames(profile))) %>%
+  map_df(~ ifelse(is.na(.x), 'missing', .x))
+
+# 构建设计矩阵，保留多个生物学变量，只能这三个，再多点就有共线性的警告了
+# breed_lv2 + sex_lv1 + growth_stage_lv1 + region_lv2 + collection_year + location_lv2
+model <- model.matrix(~ sex_lv1 + growth_stage_lv1 + region_lv2, data = group)
+
+profile_rmBatch <- ComBat(profile, batch = group$project_ID, mod = model, 
+                          par.prior = TRUE, prior.plots = FALSE) %>% 
+  data.frame(check.names = F)
+
+profile_rmBatch <- exp(profile_rmBatch) %>% 
+  profile_transRA()
+
+write.table(rownames_to_column(profile_rmBatch, 'name'),
+            'data/filtered_profile.g.ComBat.withCov.tsv',
+            sep = '\t', row.names = F, quote = F)
+
+
+### strain Combat.withoutCov | transCLR -> Combat.withoutCov -> exp -> transRA
+profile <- readRDS('data/filtered_profile.t.rds') %>% 
+  profile_transCLR(use_half_minimum = F)
+
+group <- readRDS('data/filtered_metadata.rds') %>% 
+  arrange(match(sample, colnames(profile))) %>% 
+  map_df(~ ifelse(is.na(.x), 'missing', .x))
+
+profile_rmBatch <- ComBat(profile, batch = group$project_ID,
+                          par.prior = TRUE, prior.plots = FALSE) %>% 
+  data.frame(check.names = F)
+
+profile_rmBatch <- exp(profile_rmBatch) %>% 
+  profile_transRA()
+
+write.table(rownames_to_column(profile_rmBatch, 'name'), 
+            'data/filtered_profile.t.ComBat.withoutCov.tsv',
+            sep = '\t', row.names = F, quote = F)
+
+
+### strain Combat.withCov | transCLR -> Combat.withCov -> exp -> transRA
+profile <- readRDS('data/filtered_profile.t.rds') %>% 
+  profile_transCLR(use_half_minimum = F)
+
+group <- readRDS('data/filtered_metadata.rds') %>% 
+  arrange(match(sample, colnames(profile))) %>% 
+  map_df(~ ifelse(is.na(.x), 'missing', .x))
+
+model <- model.matrix(~ sex_lv1 + growth_stage_lv1 + region_lv2, data = group)
+
+profile_rmBatch <- ComBat(profile, batch = group$project_ID, mod = model,
+                          par.prior = TRUE, prior.plots = FALSE) %>% 
+  data.frame(check.names = F)
+
+profile_rmBatch <- exp(profile_rmBatch) %>% 
+  profile_transRA()
+
+write.table(rownames_to_column(profile_rmBatch, 'name'), 
+            'data/filtered_profile.t.ComBat.withCov.tsv',
+            sep = '\t', row.names = F, quote = F)
+
+
+### genus ComBatSeq.withoutCov | ComBatSeq.withoutCov -> transRA
+group <- readRDS('data/filtered_metadata.rds') %>% 
+  arrange(match(sample, colnames(profile))) %>% 
+  map_df(~ ifelse(is.na(.x), 'missing', .x))
+
+profile <- read.delim('../pipeline/kraken2/est_rc.g.profile.gz', row.names = 1) %>% 
+  dplyr::select(group$sample)
+
+profile_rmBatch <- ComBat_seq(profile, batch = group$project_ID) %>% 
+  data.frame(check.names = F)
+
+profile_rmBatch <- profile_transRA(profile_rmBatch)
+
+write.table(rownames_to_column(profile_rmBatch, 'name'), 
+            'data/filtered_profile.g.ComBatSeq.withoutCov.tsv',
+            sep = '\t', row.names = F, quote = F)
+
+### genus ComBatSeq.withCov | ComBatSeq.withCov -> transRA
+group <- readRDS('data/filtered_metadata.rds') %>% 
+  arrange(match(sample, colnames(profile))) %>% 
+  map_df(~ ifelse(is.na(.x), 'missing', .x))
+
+profile <- read.delim('../pipeline/kraken2/est_rc.g.profile.gz', row.names = 1) %>% 
+  dplyr::select(group$sample)
+
+model <- model.matrix(~ sex_lv1 + growth_stage_lv1 + region_lv2, data = group)
+
+profile_rmBatch <- ComBat_seq(profile, batch = group$project_ID, Covar_mod = model) %>% 
+  data.frame(check.names = F)
+
+profile_rmBatch <- profile_transRA(profile_rmBatch)
+
+write.table(rownames_to_column(profile_rmBatch, 'name'), 
+            'data/filtered_profile.g.ComBatSeq.withCov.tsv',
+            sep = '\t', row.names = F, quote = F)
+
+
+### strain ComBatSeq.withoutCov | ComBatSeq.withoutCov -> transRA
+group <- readRDS('data/filtered_metadata.rds') %>% 
+  arrange(match(sample, colnames(profile))) %>% 
+  map_df(~ ifelse(is.na(.x), 'missing', .x))
+
+profile <- read.delim('../pipeline/kraken2/est_rc.t.profile.gz', row.names = 1) %>% 
+  dplyr::select(group$sample)
+
+profile_rmBatch <- ComBat_seq(profile, batch = group$project_ID) %>% 
+  data.frame(check.names = F)
+
+profile_rmBatch <- profile_transRA(profile_rmBatch)
+
+write.table(rownames_to_column(profile_rmBatch, 'name'), 
+            'data/filtered_profile.t.ComBatSeq.withoutCov.tsv',
+            sep = '\t', row.names = F, quote = F)
+
+
+### strain ComBatSeq.withCov | ComBatSeq.withCov -> transRA
+group <- readRDS('data/filtered_metadata.rds') %>% 
+  arrange(match(sample, colnames(profile))) %>% 
+  map_df(~ ifelse(is.na(.x), 'missing', .x))
+
+profile <- read.delim('../pipeline/kraken2/est_rc.t.profile.gz', row.names = 1) %>% 
+  dplyr::select(group$sample)
+
+model <- model.matrix(~ sex_lv1 + growth_stage_lv1 + region_lv2, data = group)
+
+profile_rmBatch <- ComBat_seq(profile, batch = group$project_ID, Covar_mod = model) %>% 
+  data.frame(check.names = F)
+
+profile_rmBatch <- profile_transRA(profile_rmBatch)
+
+write.table(rownames_to_column(profile_rmBatch, 'name'), 
+            'data/filtered_profile.t.ComBatSeq.withCov.tsv',
+            sep = '\t', row.names = F, quote = F)
+
+
+### genus MMUPHin.withoutCov
+profile <- readRDS('data/filtered_profile.g.rds')
+
+group <- readRDS('data/filtered_metadata.rds') %>% 
+  arrange(match(sample, colnames(profile))) %>% 
+  map_df(~ ifelse(is.na(.x), 'missing', .x)) %>% 
+  column_to_rownames('sample')
+
+profile_rmBatch <- MMUPHin::adjust_batch(profile, batch = 'project_ID', data = group)
+profile_rmBatch <- data.frame(profile_rmBatch$feature_abd_adj)
+
+write.table(rownames_to_column(profile_rmBatch, 'name'), 
+            'data/filtered_profile.g.MMUPHin.withoutCov.tsv',
+            sep = '\t', row.names = F, quote = F)
+
+### genus MMUPHin.withCov 
+profile <- readRDS('data/filtered_profile.g.rds')
+
+group <- readRDS('data/filtered_metadata.rds') %>% 
+  arrange(match(sample, colnames(profile))) %>% 
+  map_df(~ ifelse(is.na(.x), 'missing', .x)) %>% 
+  column_to_rownames('sample')
+
+profile_rmBatch <- MMUPHin::adjust_batch(profile, batch = 'project_ID', data = group, 
+                                         Covariates = c('sex_lv1','growth_stage_lv1','region_lv2'))
+profile_rmBatch <- data.frame(profile_rmBatch$feature_abd_adj)
+
+write.table(rownames_to_column(profile_rmBatch, 'name'), 
+            'data/filtered_profile.g.MMUPHin.withCov.tsv',
+            sep = '\t', row.names = F, quote = F)
+
+
+### strain MMUPHin.withoutCov
+profile <- readRDS('data/filtered_profile.t.rds')
+
+group <- readRDS('data/filtered_metadata.rds') %>% 
+  arrange(match(sample, colnames(profile))) %>% 
+  map_df(~ ifelse(is.na(.x), 'missing', .x)) %>% 
+  column_to_rownames('sample')
+
+profile_rmBatch <- MMUPHin::adjust_batch(profile, batch = 'project_ID', data = group)
+profile_rmBatch <- data.frame(profile_rmBatch$feature_abd_adj)
+
+write.table(rownames_to_column(profile_rmBatch, 'name'), 
+            'data/filtered_profile.t.MMUPHin.withoutCov.tsv',
+            sep = '\t', row.names = F, quote = F)
+
+
+### strain MMUPHin.withCov
+profile <- readRDS('data/filtered_profile.t.rds')
+
+group <- readRDS('data/filtered_metadata.rds') %>% 
+  arrange(match(sample, colnames(profile))) %>% 
+  map_df(~ ifelse(is.na(.x), 'missing', .x)) %>% 
+  column_to_rownames('sample')
+
+profile_rmBatch <- MMUPHin::adjust_batch(profile, batch = 'project_ID', data = group, 
+                                         Covariates = c('sex_lv1','growth_stage_lv1','region_lv2'))
+profile_rmBatch <- data.frame(profile_rmBatch$feature_abd_adj)
+
+write.table(rownames_to_column(profile_rmBatch, 'name'), 
+            'data/filtered_profile.t.MMUPHin.withCov.tsv',
+            sep = '\t', row.names = F, quote = F)
+
+
+### genus Limma.withoutCov | transCLR -> Limma.withoutCov -> exp -> transRA
+library(limma)
+source('/data/mengjx/R_proj/R_func/profile_process.R')
+
+profile <- readRDS('data/filtered_profile.g.rds') %>% 
+  profile_transCLR()
+
+group <- readRDS('data/filtered_metadata.rds') %>% 
+  arrange(match(sample, colnames(profile))) %>% 
+  map_df(~ ifelse(is.na(.x), 'missing', .x)) %>% 
+  column_to_rownames('sample')
+
+profile_rmBatch <- limma::removeBatchEffect(profile, batch = group$project_ID)
+
+profile_rmBatch <- exp(profile_rmBatch) %>% 
+  profile_transRA()
+
+write.table(rownames_to_column(profile_rmBatch, 'name'), 
+            'data/filtered_profile.g.Limma.withoutCov.tsv',
+            sep = '\t', row.names = F, quote = F)
+
+
+### genus Limma.withCov | transCLR -> Limma.withCov -> exp -> transRA
+profile <- readRDS('data/filtered_profile.g.rds') %>% 
+  profile_transCLR()
+
+group <- readRDS('data/filtered_metadata.rds') %>% 
+  arrange(match(sample, colnames(profile))) %>% 
+  map_df(~ ifelse(is.na(.x), 'missing', .x)) %>% 
+  column_to_rownames('sample')
+
+model <- model.matrix(~ sex_lv1 + growth_stage_lv1 + region_lv2, data = group)
+
+profile_rmBatch <- limma::removeBatchEffect(profile, batch = group$project_ID, 
+                                            design = model)
+
+profile_rmBatch <- exp(profile_rmBatch) %>% 
+  profile_transRA()
+
+write.table(rownames_to_column(profile_rmBatch, 'name'), 
+            'data/filtered_profile.g.Limma.withCov.tsv',
+            sep = '\t', row.names = F, quote = F)
+
+
+### strain Limma.withoutCov | transCLR -> Limma.withoutCov -> exp -> transRA
+profile <- readRDS('data/filtered_profile.t.rds') %>% 
+  profile_transCLR()
+
+group <- readRDS('data/filtered_metadata.rds') %>% 
+  arrange(match(sample, colnames(profile))) %>% 
+  map_df(~ ifelse(is.na(.x), 'missing', .x)) %>% 
+  column_to_rownames('sample')
+
+profile_rmBatch <- limma::removeBatchEffect(profile, batch = group$project_ID)
+
+profile_rmBatch <- exp(profile_rmBatch) %>% 
+  profile_transRA()
+
+write.table(rownames_to_column(profile_rmBatch, 'name'), 
+            'data/filtered_profile.t.Limma.withoutCov.tsv',
+            sep = '\t', row.names = F, quote = F)
+
+
+### strain Limma.withCov | transCLR -> Limma.withCov -> exp -> transRA
+profile <- readRDS('data/filtered_profile.t.rds') %>% 
+  profile_transCLR()
+
+group <- readRDS('data/filtered_metadata.rds') %>% 
+  arrange(match(sample, colnames(profile))) %>% 
+  map_df(~ ifelse(is.na(.x), 'missing', .x)) %>% 
+  column_to_rownames('sample')
+
+model <- model.matrix(~ sex_lv1 + growth_stage_lv1 + region_lv2, data = group)
+
+profile_rmBatch <- limma::removeBatchEffect(profile, batch = group$project_ID, 
+                                            design = model)
+
+profile_rmBatch <- exp(profile_rmBatch) %>% 
+  profile_transRA()
+
+write.table(rownames_to_column(profile_rmBatch, 'name'), 
+            'data/filtered_profile.t.Limma.withCov.tsv',
+            sep = '\t', row.names = F, quote = F)
+
+#### remove batch effect 5662-sample assess ####
+source('/data/mengjx/R_proj/R_func/palette.R')
+source('/data/mengjx/R_proj/R_func/calcu_diff.R')
+
+vars_level <- c('project_ID','breed_lv1','breed_lv2','sex_lv1', 'growth_stage_lv1','region_lv1',
+                'region_lv2','collection_year','location_lv1','location_lv2')
+
+method_level <- c('Raw', 'ComBat-withoutCov', 'ComBat-withCov', 'ComBatSeq-withoutCov', 'ComBatSeq-withCov',
+                  'Limma-withoutCov', 'Limma-withCov', 'MMUPHin-withoutCov', 'MMUPHin-withCov')
+
+read.delim('assess_rmBatch/permanova_results.tsv') %>% 
+  filter(taxa_level == 'genus') %>% 
+  add_plab(by = 'p.value') %>% 
+  mutate(method = factor(method, method_level),
+         name = factor(name, unique(name))) %>% 
+  ggbarplot('method', 'r2', fill = 'method', palette = colorRampPalette(pald('rainbow3'))(9),
+            x.text.angle = 90, label = .$plab, lab.size = 3, lab.col = 'red', lab.vjust = .3) +
+  facet_wrap(~ name, nrow = 3, scale = 'free_y')
+ggsave('assess_rmBatch/permanova_results_genus.pdf', width = 16, height = 8)
+
+read.delim('assess_rmBatch/permanova_results.tsv') %>% 
+  filter(taxa_level == 'strain') %>% 
+  add_plab(by = 'p.value') %>% 
+  mutate(method = factor(method, method_level),
+         name = factor(name, unique(name))) %>% 
+  ggbarplot('method', 'r2', fill = 'method', palette = colorRampPalette(pald('rainbow3'))(9),
+            x.text.angle = 90, label = .$plab, lab.size = 3, lab.col = 'red', lab.vjust = .3) +
+  facet_wrap(~ name, nrow = 3, scale = 'free_y')
+ggsave('assess_rmBatch/permanova_results_strain.pdf', width = 16, height = 8)
+
+#### word cloud ####
+source('/data/mengjx/R_proj/R_func/palette.R')
+library(ggwordcloud)
+library(spacyr)
+
+data <- read.delim('preprocess/word_cloud.txt', header = F) %>% pull
+
+stringr::str_split(data, ' ') %>% 
+  map(~ stringr::str_to_title(.x)) %>% 
+  list_c() %>%
+  table %>% 
+  data.frame %>% 
+  rename(name = '.') %>% 
+  write.xlsx('preprocess/word_cloud.xlsx')
+
+data <- read.xlsx('preprocess/word_cloud_reshape.xlsx') %>% 
+  filter(Freq > 2) %>% 
+  mutate(angle = 45 * sample(-2:2, n(), replace = TRUE, prob = c(1, 1, 4, 1, 1)))
+
+ggplot(data, aes(label = name, size = Freq, angle = angle,
+                 color = factor(sample.int(10, nrow(data), replace = TRUE)) ) ) +
+  geom_text_wordcloud_area(shape = 'circle') +
+  scale_size_area(max_size = 25) +
+  scale_color_manual(values = palc('rb', 28)[7:28]) +
+  theme_pubr()
+ggsave('preprocess/word_cloud.pdf', width = 6, height = 3)
+```
+
+## access the batch effect 
+```{py}
+import pandas as pd
+import numpy as np
+import os, re
+
+# PERMANOVA function
+def calcu_permanova_r2(dist, group_labels):
+    """
+    R² 的计算公式：R² = SS_between / SS_total
+    SS_between：组间平方和（Be tween-group Sum of Squares）
+    SS_total：总平方和（Total Sum of Squares）
+    SS_between = SS_total - SS_within
+    SS_within：累加各组中的平方和
+    """
+    ss_total = np.sum(dist.data ** 2) / (len(dist.ids) * 2)
+    group_level = np.unique(group_labels)
+    ss_within = 0.0
+    for group in group_level:
+        sample_indexs = np.where(group_labels == group)[0]   # 当前组的样本索引
+        sub_dist = dist[sample_indexs][:,sample_indexs]      # 提取组内子距离矩阵
+        sample_n = len(sample_indexs)                        # 当前组的样本量
+        ss_within += np.sum(sub_dist ** 2) / (sample_n * 2)
+    ss_between = ss_total - ss_within
+    r2 = ss_between / ss_total
+    return f'{r2:.4f}'
+    
+from skbio.stats.distance import permanova
+from skbio.stats.distance import DistanceMatrix
+
+# 为每批数据计算permanova，评估所有变量对矩阵的解释度
+files = [ x.replace('.dist', '') for x in os.listdir('permanova') if x.endswith('dist') ]
+
+variables = ['project_ID', 'breed_lv1', 'breed_lv2', 'sex_lv1', 'growth_stage_lv1', 'region_lv1', 'region_lv2', 'collection_year', 'location_lv1', 'location_lv2']
+
+for x in files:
+    dist = DistanceMatrix.read('assess_rmBatch/' + x + '.dist')
+    
+    group = pd.read_csv('data/filtered_metadata.tsv', sep='\t', dtype=str)
+    group = group.set_index('sample').loc[list(dist.ids)]     
+    
+    permanova_results = {}
+
+    for y in variables:
+        # 共两种情况，一个是去除NAN后的变量，另外是将NAN替换成missing的变量
+        if sum(group[y].isnull()) > 0:
+            sub_group = group[group[y].notnull()]
+            sub_dist = dist.filter(sub_group.index)
+            result = permanova(sub_dist, sub_group, column=y, seed=2025, permutations=999)
+            result['r2'] = calcu_permanova_r2(sub_dist, sub_group[y])
+            permanova_results[y + '.remove_na' + '(' + str(sub_group.shape[0]) + ')' ] = result
+            # 然后替换NAN为 missing 进行计算
+            sub_group = group.copy()
+            sub_group[y] = sub_group[y].fillna('missing')
+            result = permanova(dist, sub_group, column=y, seed=2025, permutations=999)
+            result['r2'] = calcu_permanova_r2(dist, sub_group[y])
+            permanova_results[y + '.replace_na'] = result
+        else:
+            result = permanova(dist, group, column=y, seed=2025, permutations=999)
+            result['r2'] = calcu_permanova_r2(dist, group[y])
+            permanova_results[y] = result
+    
+    df = pd.DataFrame(permanova_results).T
+    df.columns = df.columns.str.replace(' ', '_')
+    df.to_csv('assess_rmBatch/' + x + '.permanova.tsv', sep='\t', index_label='name')
+
+files = [ x for x in os.listdir('permanova') if x.endswith('.permanova.tsv') ]
+data = []
+for x in files:
+    _data = pd.read_csv('assess_rmBatch/' + x, sep='\t')
+    _data['filename'] = x
+    data.append(_data)
+
+result = pd.concat(data)
+result['taxa_level'] = [ 'genus' if re.findall('filtered_profile.(\w)', x)[0] == 'g' else 'strain' for x in result.filename ]
+result['method'] = [ x.replace('.permanova.tsv', '').replace('filtered_profile.g.', '').replace('filtered_profile.t.', '').replace('.', '-') for x in result.filename ]
+result = result.drop('filename', axis=1)
+result.to_csv('assess_rmBatch/permanova_results.tsv', sep='\t', index=None)
+```

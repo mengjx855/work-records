@@ -1,0 +1,292 @@
+---
+title: "non-target MBX on PDCoV Sus feces ZhangYQ"
+author: "Jinxin Meng"
+date: "2025-03-28"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## MBX downstream analysis 
+
+```{R}
+#### info ####
+grp <- c('Mock','PDCoV')
+grp_col <- structure(c('#a0a0a4','#d7b0b0'), names = grp)
+
+MBT_info <- read.delim("../data/MBT_info_20250329_210346600.tsv")
+group <- read.delim("../data/group_rename.tsv")
+profile <- read.delim("../data/MBT_profile_20250329_210346600.tsv", 
+                      row.names = 1) %>% 
+  select(all_of(group$sample))
+
+cpd_info <- read.delim('/database/HMDB/v5.0/HMDB_html/HMDB_class.tsv')
+cpd_info <- read.delim('/database/KEGG/enrichment_analysis/cpd2path_enrichment.tsv')
+
+#### PCA ####
+source("/code/R_func/plot_PCA.R")
+
+plot_PCA(profile, group, group_order = grp, group_color = grp_col, 
+         add_group_label = T,  lab_size = 3, ellipse_level = .9, 
+         show_legend = F, show_grid = T, show_line = F)
+ggsave("PCA.pdf", width = 4, height = 3)
+
+#### PLS ####
+source("/code/R_func/plot_PLS.R")
+
+plot_PLS(log10(profile), group, group_order = grp, group_color = grp_col,
+         add_group_label = T,  lab_size = 3, ellipse_level = .9, 
+         show_legend = F, show_grid = T, show_line = F)
+ggsave("PLS.pdf", width = 4, height = 3)
+
+#### class HMDB ####
+data <- profile %>% 
+  mutate(HMDB = MBT_info$HMDB[match(rownames(profile), MBT_info$cpd_id)]) %>% 
+  filter(HMDB != '' & grepl('HMDB', HMDB)) %>% 
+  aggregate(. ~ HMDB, ., sum) %>% 
+  group_by(HMDB) %>% 
+  group_modify(~ {
+    .names <- unlist(str_split(.y, ";"))
+    .len <- length(.names)
+    .colnames <- colnames(.x)
+    .out <- matrix(rep(as.numeric(.x[1,]) / .len, .len), ncol = ncol(.x), 
+                   byrow = T) %>% 
+      data.frame(row.names = .names)
+    colnames(.out) <- .colnames
+    .out %>% rownames_to_column('name') } ) %>% 
+  ungroup %>% 
+  select(-1) %>% 
+  aggregate(. ~ name, ., sum)
+
+data %>% 
+  filter(grepl('HMDB', name)) %>% 
+  mutate(super_class = cpd_info$super_class[match(name, cpd_info$name)],
+         class = cpd_info$class[match(name, cpd_info$name)]) %>% 
+  filter(!is.na(super_class)) %>% 
+  filter(super_class != "Homogeneous non-metal compounds") %>% 
+  select(-name, -super_class) %>% 
+  aggregate(. ~ class, ., sum) %>% 
+  write.table('class_ab.tsv', sep = '\t', quote = F, row.names = F)
+
+# class
+diff <- data %>% 
+  filter(grepl('HMDB', name)) %>% 
+  mutate(super_class = cpd_info$super_class[match(name, cpd_info$name)],
+         class = cpd_info$class[match(name, cpd_info$name)]) %>% 
+  filter(!is.na(super_class)) %>% 
+  filter(super_class != "Homogeneous non-metal compounds") %>% 
+  select(-name, -super_class) %>% 
+  aggregate(. ~ class, ., sum) %>% 
+  column_to_rownames('class') %>% 
+  difference_analysis(group, comparison = c('PDCoV', 'Mock'), 
+                      method = 'wilcox', add_enriched = T)
+write.xlsx(diff, 'diff.class_ab.xlsx')
+
+read.xlsx('diff.class_ab_plot.xlsx') %>% 
+  add_significance(p.col = 'pval') %>% 
+  mutate(.name = paste(name, " ", pval.signif)) %>% 
+  ggdotchart('.name', 'log2FC', color = 'enriched', palette = grp_col,
+             add = "segments", rotate = T, xlab = '')
+ggsave('diff.class_ab.log2FC.pdf', width = 6, height = 5)
+
+#### sub_class HMDB ####
+diff <- data %>% 
+  filter(grepl('HMDB', name)) %>% 
+  mutate(super_class = cpd_info$super_class[match(name, cpd_info$name)],
+         sub_class = cpd_info$sub_class[match(name, cpd_info$name)]) %>% 
+  filter(!is.na(super_class)) %>% 
+  filter(super_class != "Homogeneous non-metal compounds") %>% 
+  select(-name, -super_class) %>% 
+  aggregate(. ~ sub_class, ., sum) %>% 
+  column_to_rownames('sub_class') %>% 
+  difference_analysis(group, comparison = c('PDCoV', 'Mock'), 
+                      method = 'wilcox', add_enriched = T)
+write.xlsx(diff, 'diff.sub_class_ab.xlsx')
+
+plot_data <- data %>% 
+  filter(grepl('HMDB', name)) %>% 
+  mutate(super_class = cpd_info$super_class[match(name, cpd_info$name)],
+         sub_class = cpd_info$sub_class[match(name, cpd_info$name)]) %>% 
+  filter(!is.na(super_class)) %>% 
+  filter(super_class != "Homogeneous non-metal compounds") %>% 
+  select(-name, -super_class) %>% 
+  aggregate(. ~ sub_class, ., sum) %>% 
+  filter(sub_class == 'Bile acids, alcohols and derivatives') %>% 
+  gather('sample', 'value', -sub_class) %>% 
+  left_join(group, by = 'sample') %>% 
+  mutate(.value = log10(value))
+
+wilcox_test(plot_data, value ~ group)
+ggbarplot(plot_data, 'group', '.value', fill = 'group', palette = grp_col,
+          add = 'mean_sd', ylab = 'log10-Content', xlab = '', legend = 'none') +
+  ggsignif::geom_signif(y_position = 7, xmin = 1, xmax = 2, 
+                        annotations = '0.09', tip_length = 0.2) +
+  theme(aspect.ratio = 1.8)
+ggsave('diff.class_bile-acids.pdf', width = 2, height = 3)
+
+#### class KEGG ####
+data <- profile %>% 
+  mutate(KEGG = MBT_info$KEGG[match(rownames(profile), MBT_info$cpd_id)]) %>% 
+  filter(KEGG != '' & grepl('C', KEGG)) %>% 
+  aggregate(. ~ KEGG, ., sum) %>% 
+  group_by(KEGG) %>% 
+  group_modify(~ {
+    .names <- unlist(str_split(.y, ";"))
+    .len <- length(.names)
+    .colnames <- colnames(.x)
+    .out <- matrix(rep(as.numeric(.x[1,]) / .len, .len), ncol = ncol(.x), 
+                   byrow = T) %>% 
+      data.frame(row.names = .names)
+    colnames(.out) <- .colnames
+    .out %>% rownames_to_column('name') } ) %>% 
+  ungroup %>% 
+  select(-1) %>% 
+  aggregate(. ~ name, ., sum)
+
+write.table(data, 'class_KEGG_ab.tsv', sep = '\t', quote = F, row.names = F)
+
+# class
+diff <- data %>%  
+  mutate(pathway = cpd_info$pathway[match(name, cpd_info$ID)]) %>% 
+  filter(!is.na(pathway)) %>% 
+  select(-name) %>% 
+  aggregate(. ~ pathway, ., sum) %>% 
+  column_to_rownames('pathway') %>% 
+  difference_analysis(group, comparison = c('PDCoV', 'Mock'), 
+                      method = 'wilcox', add_enriched = T)
+write.xlsx(diff, 'diff.class_KEGG_ab.xlsx')
+
+read.xlsx('diff.class_ab_plot.xlsx') %>% 
+  add_significance(p.col = 'pval') %>% 
+  mutate(.name = paste(name, " ", pval.signif)) %>% 
+  ggdotchart('.name', 'log2FC', color = 'enriched', palette = grp_col,
+             add = "segments", rotate = T, xlab = '')
+ggsave('diff.class_ab.log2FC.pdf', width = 6, height = 5)
+
+#### sub_class KEGG ####
+diff <- data %>% 
+  filter(grepl('HMDB', name)) %>% 
+  mutate(super_class = cpd_info$super_class[match(name, cpd_info$name)],
+         sub_class = cpd_info$sub_class[match(name, cpd_info$name)]) %>% 
+  filter(!is.na(super_class)) %>% 
+  filter(super_class != "Homogeneous non-metal compounds") %>% 
+  select(-name, -super_class) %>% 
+  aggregate(. ~ sub_class, ., sum) %>% 
+  column_to_rownames('sub_class') %>% 
+  difference_analysis(group, comparison = c('PDCoV', 'Mock'), 
+                      method = 'wilcox', add_enriched = T)
+write.xlsx(diff, 'diff.sub_class_ab.xlsx')
+
+plot_data <- data %>% 
+  filter(grepl('HMDB', name)) %>% 
+  mutate(super_class = cpd_info$super_class[match(name, cpd_info$name)],
+         sub_class = cpd_info$sub_class[match(name, cpd_info$name)]) %>% 
+  filter(!is.na(super_class)) %>% 
+  filter(super_class != "Homogeneous non-metal compounds") %>% 
+  select(-name, -super_class) %>% 
+  aggregate(. ~ sub_class, ., sum) %>% 
+  filter(sub_class == 'Bile acids, alcohols and derivatives') %>% 
+  gather('sample', 'value', -sub_class) %>% 
+  left_join(group, by = 'sample') %>% 
+  mutate(.value = log10(value))
+
+wilcox_test(plot_data, value ~ group)
+ggbarplot(plot_data, 'group', '.value', fill = 'group', palette = grp_col,
+          add = 'mean_sd', ylab = 'log10-Content', xlab = '', legend = 'none') +
+  ggsignif::geom_signif(y_position = 7, xmin = 1, xmax = 2, 
+                        annotations = '0.09', tip_length = 0.2) +
+  theme(aspect.ratio = 1.8)
+ggsave('diff.class_bile-acids.pdf', width = 2, height = 3)
+
+#### diff ####
+plsda <- opls(data.frame(t(log10(profile))), y = pull(group, group), orthoI = 0)
+diff <- difference_analysis(log10(profile), group, comparison = c('PDCoV', 'Mock'), 
+                            method = 't')
+
+diff <- data.frame(plsda_vip = plsda@vipVn) %>% 
+  rownames_to_column("name") %>% 
+  left_join(diff, ., by = "name") %>% 
+  mutate(enriched = ifelse((plsda_vip > 1 | pval < 0.05) & log2FC > 0, "PDCoV", 
+                           ifelse((plsda_vip > 1 | pval < 0.05) & log2FC < 0, 
+                                  "Mock", "none"))) %>% 
+  left_join(MBT_info, c('name' = 'cpd_id'))
+write.xlsx(diff, "diff.xlsx")
+
+#### volcano ####
+bile_related <- read.delim("/database/KEGG/enrichment_analysis/cpd2path_enrichment.tsv") %>% 
+  filter(grepl('bile', pathway)) %>% 
+  pull(ID) %>% 
+  unique()
+
+plot_label <- diff %>% 
+  filter(rowSums(sapply(bile_related, \(x) grepl(x, KEGG))) > 0) %>% 
+  filter(enriched != 'none')
+  
+plot_data <- diff %>% 
+  select(name, cpd_name, pval, log2FC, enriched, plsda_vip) %>% 
+  mutate(.enriched = ifelse(is.na(enriched), 'none', enriched),
+         .pval = -log10(pval),
+         .log2FC = log2FC,
+         .log2FC = ifelse(.log2FC < -5, -5, .log2FC),
+         .log2FC = ifelse(.log2FC > 2.5, 2.5, .log2FC),
+         .vip = ifelse(plsda_vip > 1, plsda_vip, .8),
+         .label = ifelse(name %in% plot_label$name, cpd_name, ''))
+
+ggscatter(plot_data, ".log2FC", ".pval", color = ".enriched", size = '.vip', 
+          xlab = 'log2FoldChange', ylab = "-log10 P-value",
+          palette = c(grp_col, 'none' = 'grey78')) +
+  scale_size_continuous(range = c(1, 2.5)) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  geom_vline(xintercept = c(0), linetype = "dashed") +
+  theme(aspect.ratio = 1)
+ggsave('diff.volcano.pdf', width = 5, height = 5)
+
+ggscatter(plot_data, ".log2FC", ".pval", color = ".enriched", size = '.vip', 
+          xlab = 'log2FoldChange', ylab = "-log10 P-value",
+          palette = c(grp_col, 'none' = 'grey78')) +
+  scale_size_continuous(range = c(1, 2.5)) +
+  geom_text(aes(label = .label), size = 1) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  geom_vline(xintercept = c(0), linetype = "dashed") +
+  theme(aspect.ratio = 1)
+ggsave('diff.volcano.bile.pdf', width = 5, height = 5)
+
+#### enrich ####
+path_info <- read.delim("/database/KEGG/enrichment_analysis/cpd2path_enrichment.tsv")
+
+eKEGG <- diff %>% 
+  filter(enriched != 'none') %>% 
+  filter(KEGG != "") %>% 
+  pull(KEGG) %>% 
+  map(~ unlist(strsplit(.x, ";"))) %>% 
+  flatten_chr() %>% 
+  enricher(TERM2GENE = path_info, minGSSize = 1, pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+  data.frame
+write.xlsx(eKEGG, "diff.eKEGG.xlsx")
+
+kegg_info <- read.delim('/database/KEGG/v20230401/path_description') %>% 
+  filter(category == 'Metabolism')
+
+path_name <- c('map00997', 'map01040', 'map01230', 'map00120', 'map00920', 
+               'map01200', 'map00400', 'map00121', 'map00310', 'map00100',
+               'map00350', 'map00460', 'map00270')
+
+plot_data <- eKEGG %>%
+  mutate(path = map_vec(strsplit(ID, ':'), \(x) x[1])) %>% 
+  filter(path %in% path_name) %>% 
+  arrange(FoldEnrichment)
+
+ggscatter(plot_data, "ID", "FoldEnrichment", fill = "pvalue", 
+          rotate = T, size = 'FoldEnrichment',
+          shape = 21, legend = 'right', xlab = '', ylab = 'Fold Enrichment') +
+  scale_fill_viridis_c(begin = .6) +
+  scale_size_continuous(range = c(3, 6)) +
+  theme(aspect.ratio = 2, 
+        panel.grid.major = element_line(linewidth = .5, color = 'grey88'))
+ggsave('diff.eKEGG.pdf', width = 8, height = 4.5)
+```

@@ -1,0 +1,165 @@
+---
+title: "RNASeq Mus EMCV CW3"
+author: "Jinxin Meng"
+date: "2024-12-08"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## Mus EMCV-W3 RNASeq 
+
+```{R}
+# GSEA KEGG -------
+genes <- AnnotationDbi::select(org.Mm.eg.db, keys(org.Mm.eg.db), keytype = "ENTREZID", columns = "SYMBOL")
+
+diff <- read.delim("data/Mock_CW3.vs.Mock.txt") %>% 
+  dplyr::select(name, log2FC, pval = PValue, FDR) %>% 
+  left_join(genes, by = c("name" = "SYMBOL")) %>% 
+  filter(!is.na(ENTREZID))
+
+gene_list <- structure(diff$log2FC, names = diff$ENTREZID) %>% sort(decreasing = T)
+
+# saveRDS(gene_list, "gene_list.rds")
+
+register(SerialParam())
+system.time(gseKEGG <- gseKEGG(gene_list, organism = "mmu", minGSSize = 10, maxGSSize = 1000, pvalueCutoff = 1))
+
+gseKEGG_out <- data.frame(gseKEGG, row.names = NULL) %>% 
+  mutate(geneName = map_vec((strsplit(x = core_enrichment, "/")), \(x) paste(genes$SYMBOL[match(x, genes$ENTREZID)], collapse = "/")), .after = core_enrichment, 
+         Description = gsub(" - Mus.*", "", Description))
+
+# write.table(gseKEGG_out, "Mock_CW3.vs.Mock.gseKEGG.tsv", sep = "\t", row.names = F, quote = F)
+
+maps <- read.delim("br08901.tsv") %>% 
+  mutate(C_id = sub("map", "mmu", C_id))
+
+data <- gseKEGG_out %>% 
+  left_join(maps, by = c("ID" = "C_id")) %>% 
+  filter(A_name == "Metabolism") %>% 
+  mutate(enriched = ifelse(enrichmentScore > 0, "up", "down")) %>% 
+  group_by(enriched) %>% 
+  group_modify(~.x %>% head(10)) %>% 
+  arrange(desc(NES))
+
+ggbarplot(data, "Description", "NES", fill = "pvalue", rotate = T, width = .6, 
+          ylab = "NES", xlab = "", legend = "right",
+          title = "Mock CW3 vs. Mock\ntop20 metabolism pathways") +
+  scale_fill_gradient(low = "#fdae61", high = "#abd9e9")
+
+# ggsave("gseKEGG.metabolism.pdf", width = 8, height = 6)
+
+
+# 可视化几个通路相关的基因 火山图 -------
+keggs <- download_KEGG("mmu")
+
+plot_list <- map2(data$ID, data$Description, 
+    \(x, y)
+    keggs$KEGGPATHID2EXTID %>% 
+      filter(from == x) %>% 
+      left_join(diff, by = c("to" = "ENTREZID")) %>% 
+      filter(!is.na(name)) %>% 
+      mutate(enriched = ifelse(log2FC > 0 & pval < 0.05, "up",
+                               ifelse(log2FC < 0 & pval < 0.05, "down", "none")),
+             label = ifelse(enriched != "none", name, NA),
+             pval2 = -log10(pval)) %>% 
+      ggscatter("log2FC", "pval2", color = "enriched", legend = "none", ylab = "-log10-pvalue",
+                palette = c(up = "#fdae61", none = "grey", down = "#abd9e9"), size = 3,
+                title = y) +
+      geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+      geom_vline(xintercept = 0, linetype = "dashed") +
+      geom_text(aes(label = label), size = 3, fontface = "italic") +
+      theme(aspect.ratio = 1,
+            plot.title = element_text(face = "bold"))
+    )
+
+cowplot::plot_grid(plotlist = plot_list, nrow = 5, align = "v")
+# ggsave("gseKEGG.metabolism.gene.volcano.pdf", width = 16, height = 20)
+
+
+# PPAR signaling pathway ----------
+keggs$KEGGPATHID2EXTID %>% 
+  filter(from == "mmu03320") %>% 
+  left_join(diff, by = c("to" = "ENTREZID")) %>% 
+  filter(!is.na(name)) %>% 
+  mutate(enriched = ifelse(log2FC > 0 & pval < 0.05, "up",
+                           ifelse(log2FC < 0 & pval < 0.05, "down", "none")),
+         label = ifelse(enriched != "none", name, NA),
+         pval2 = -log10(pval)) %>% 
+  ggscatter("log2FC", "pval2", color = "enriched", legend = "none", ylab = "-log10-pvalue",
+            palette = c(up = "#fdae61", none = "grey", down = "#abd9e9"), size = 3,
+            title = "PPAR signaling pathway") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_text(aes(label = label), size = 3, fontface = "italic") +
+  theme(aspect.ratio = 1,
+        plot.title = element_text(face = "bold"))
+ggsave("gseKEGG.PPAR.gene.volcano.pdf", width = 4, height = 4)
+
+library(pathview)
+
+data <- keggs$KEGGPATHID2EXTID %>% 
+  filter(from == "mmu03320") %>% 
+  left_join(diff, by = c("to" = "ENTREZID")) %>% 
+  filter(!is.na(name)) %>% 
+  mutate(enriched = ifelse(log2FC > 0 & pval < 0.05, "up",
+                           ifelse(log2FC < 0 & pval < 0.05, "down", "none"))) %>% 
+  filter(enriched != "none") %>% 
+  mutate(enriched = recode(enriched, up = 1, down = -1))
+
+gene <- structure(data$enriched, names = data$to)
+
+pathview(gene.data = gene, pathway.id ="03320", species = "mmu", out.suffix = "PPAR",
+         low = "#abd9e9", high = "#fdae61")
+
+
+# ORA KEGG ------
+diff <- read.delim("data/Mock_CW3.vs.Mock.txt") %>% 
+  dplyr::select(name, log2FC, pval = PValue, FDR) %>% 
+  mutate(enriched = ifelse(log2FC > 0 & pval < 0.05, "up",
+                           ifelse(log2FC < 0 & pval < 0.05, "down", "none"))) %>% 
+  filter(enriched == "down")
+
+genes <- select(org.Mm.eg.db, diff$name, keytype = "SYMBOL", columns = "ENTREZID")
+
+eKEGG <- enrichKEGG(gene = na.omit(genes$ENTREZID), organism = "mmu", pvalueCutoff = 1, qvalueCutoff = 1)
+eKEGG_out <- data.frame(eKEGG) %>% 
+  mutate(geneName = map_vec((strsplit(x = geneID, "/")), \(x) paste(genes$SYMBOL[match(x, genes$ENTREZID)], collapse = "/")), .after = geneID, 
+         Description = gsub(" - Mus.*", "", Description))
+# write.table(eKEGG_out, "Mock_CW3.vs.Mock.eKEGG.down2.tsv", sep = "\t", row.names = F, quote = F)
+
+# 上调基因
+p1 <- read.delim("Mock_CW3.vs.Mock.eKEGG.up2.tsv") %>% 
+  filter(category == "Metabolism") %>% 
+  dplyr::select(all_of(c("Description","GeneRatio","pvalue"))) %>% 
+  mutate(GeneRatio = map_vec(strsplit(GeneRatio, "/"), \(x) as.numeric(x[1])/as.numeric(x[2]))) %>% 
+  arrange(desc(GeneRatio)) %>% 
+  mutate(Description = factor(Description, rev(Description))) %>% 
+  head(20) %>% 
+  ggbarplot("Description", "GeneRatio", fill = "pvalue", rotate = T, width = .6, 
+            ylab = "Gene ratio", xlab = "", legend = "right",
+            title = "Mock_CW3 vs. Mock\ntop20 pathways for up-regulated genes") +
+  scale_fill_gradient(low = "#fdae61", high = "#abd9e9")
+
+# 下调基因
+p2 <- read.delim("Mock_CW3.vs.Mock.eKEGG.down2.tsv") %>% 
+  filter(category == "Metabolism") %>% 
+  dplyr::select(all_of(c("Description","GeneRatio","pvalue"))) %>% 
+  mutate(GeneRatio = map_vec(strsplit(GeneRatio, "/"), \(x) as.numeric(x[1])/as.numeric(x[2]))) %>% 
+  arrange(desc(GeneRatio)) %>% 
+  mutate(Description = factor(Description, rev(Description))) %>% 
+  head(20) %>% 
+  ggbarplot("Description", "GeneRatio", fill = "pvalue", rotate = T, width = .6, 
+            ylab = "Gene ratio", xlab = "", legend = "right",
+            title = "Mock_CW3 vs. Mock\ntop20 pathways for down-regulated genes") +
+  scale_fill_gradient(low = "#fdae61", high = "#abd9e9")
+
+cowplot::plot_grid(p1, p2, align = "v")
+ggsave("eKEGG.pdf", width = 16, height = 8)
+
+```

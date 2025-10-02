@@ -1,0 +1,199 @@
+---
+title: "Multi-omics (Lipidome and RNASeq) association analysis (WGCNA) LiJL"
+author: "Jinxin Meng"
+date: "2025-09-24"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## WGCNA
+
+```{R}
+#### WGCNA with Lipid ####
+library(WGCNA)
+source('/data/mengjx/R_proj/R_func/calcu_difference.R')
+
+fpkm <- read.delim('../data/profile_fpkm.tsv', row.names = 1)
+fpkm <- fpkm[rowSums(fpkm > 0) > 17,]
+
+# Choose a set of soft-thresholding powers
+powers = 1:20
+sft <- pickSoftThreshold(t(fpkm), powerVector = powers, verbose = 5)
+write.xlsx(sft$fitIndices, 'WGCNA/SoftThreshold.xlsx')
+
+pdf('WGCNA_Lipid/SoftThreshold.pdf', width = 12, height = 5)
+par(mfrow = c(1, 2))
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices$Power, -sign(sft$fitIndices$slope) * sft$fitIndices$SFT.R.sq, 
+     type = 'b', xlab = 'Soft Threshold (Power)', ylab = 'Scale-free Topology Fit Index',
+     main = 'Scale-free Topology Fit', bty = 'l')
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices$Power, sft$fitIndices$mean.k., type = 'b',
+     xlab = 'Soft Threshold (Power)',ylab = 'Mean Connectivity', 
+     main = 'Mean connectivity', bty = 'l')
+dev.off()
+
+# Constructing the gene network and identifying modules 
+power = 10
+net <- blockwiseModules(
+  t(fpkm), power = power, networkType = 'unsigned', TOMType = 'unsigned', 
+  maxBlockSize = 20000, minModuleSize = 30, mergeCutHeight = 0.2, 
+  numericLabels = T, verbose = 3, saveTOMs = T, saveTOMFileBase = 'WGCNA/TOM')
+saveRDS(net, 'WGCNA/Net.rds')
+
+# 检测到26个模块，The label 0 is reserved for genes out side of all modules.
+table(net$colors)
+
+# mergedColors = labels2colors(net$colors)
+# Plot the dendrogram and the module colors underneath
+# plotDendroAndColors(net$dendrograms[[1]], mergedColors[net$blockGenes[[1]]],
+#                     'Modulecolors',  dendroLabels = F, hang = 0.03,
+#                     addGuide = T, guideHang = 0.05)
+
+# 模块特征关联脂质类别
+moduleColors <- labels2colors(net$colors)
+MEs0 <- moduleEigengenes(t(fpkm), moduleColors)$eigengenes
+MEs <- orderMEs(MEs0)
+
+class_prof <- read.xlsx('../../Lipid_SFTS_Mus_Liver/Lipid_category_prof.xlsx', rowNames = T) %>% 
+  t %>% data.frame()
+class_prof <- class_prof[colnames(fpkm),]
+
+nSamples <- ncol(fpkm)
+moduleTraitCor <- cor(MEs, class_prof, use = 'p')
+moduleTraitPvalue <- corPvalueStudent(moduleTraitCor, nSamples)
+
+textMatrix <- paste(signif(moduleTraitCor, 2), ' ', 
+                    apply(moduleTraitPvalue, 2, \(x) add_plab(x)), sep = '') %>% 
+  gsub('\\(\\)', '', .)
+dim(textMatrix) <- dim(moduleTraitCor)
+rownames(textMatrix) = rownames(moduleTraitPvalue)
+colnames(textMatrix) = colnames(moduleTraitPvalue)
+
+pdf('WGCNA/Heatmap_ME_Lipid_Category.pdf', width = 7, height = 10)
+pheatmap(moduleTraitCor, 
+         cellwidth = 35, cellheight = 20,
+         color = colorRampPalette(c("#3288bd", "#ffffff", "#d53e4f"))(100),
+         border_color = 'white', border_gp = gpar(col = 'black'),
+         display_numbers = textMatrix, number_color = 'black', 
+         treeheight_row = 30, treeheight_col = 30,
+         main = 'Module-Lipid Category relationships',
+         heatmap_legend_param = list(title = 'Correlation'))
+dev.off()
+
+# 模块特征关联脂质主类型
+class_prof <- read.xlsx('../../Lipid_SFTS_Mus_Liver/Lipid_main_class_prof.xlsx', rowNames = T) %>% 
+  t %>% data.frame()
+class_prof <- class_prof[colnames(fpkm),]
+
+moduleTraitCor <- cor(MEs, class_prof, use = 'p')
+moduleTraitPvalue <- corPvalueStudent(moduleTraitCor, nSamples)
+
+textMatrix <- paste(signif(moduleTraitCor, 2), ' ', 
+                    apply(moduleTraitPvalue, 2, \(x) add_plab(x)), sep = '') %>% 
+  gsub('\\(\\)', '', .)
+dim(textMatrix) <- dim(moduleTraitCor)
+rownames(textMatrix) = rownames(moduleTraitPvalue)
+colnames(textMatrix) = colnames(moduleTraitPvalue)
+
+pdf('WGCNA/Heatmap_ME_Lipid_Main_Class.pdf', width = 12, height = 10)
+pheatmap(moduleTraitCor, 
+         cellwidth = 35, cellheight = 20,
+         color = colorRampPalette(c("#3288bd", "#ffffff", "#d53e4f"))(100),
+         border_color = 'white', border_gp = gpar(col = 'black'),
+         display_numbers = textMatrix, number_color = 'black', 
+         treeheight_row = 30, treeheight_col = 30,
+         main = 'Module-Lipid Category relationships',
+         heatmap_legend_param = list(title = 'Correlation'))
+dev.off()
+
+# 模块特征关联脂质次类型
+class_prof <- read.xlsx('../../Lipid_SFTS_Mus_Liver/Lipid_sub_class_prof.xlsx', rowNames = T) %>% 
+  t %>% data.frame()
+class_prof <- class_prof[colnames(fpkm),]
+
+moduleTraitCor <- cor(MEs, class_prof, use = 'p')
+moduleTraitPvalue <- corPvalueStudent(moduleTraitCor, nSamples)
+
+textMatrix <- paste(signif(moduleTraitCor, 2), ' ', 
+                    apply(moduleTraitPvalue, 2, \(x) add_plab(x)), sep = '') %>% 
+  gsub('\\(\\)', '', .)
+dim(textMatrix) <- dim(moduleTraitCor)
+rownames(textMatrix) = rownames(moduleTraitPvalue)
+colnames(textMatrix) = colnames(moduleTraitPvalue)
+
+pdf('WGCNA/Heatmap_ME_Lipid_Sub_Class.pdf', width = 18, height = 10)
+pheatmap(moduleTraitCor, 
+         cellwidth = 35, cellheight = 20,
+         color = colorRampPalette(c("#3288bd", "#ffffff", "#d53e4f"))(100),
+         border_color = 'white', border_gp = gpar(col = 'black'),
+         display_numbers = textMatrix, number_color = 'black', 
+         treeheight_row = 30, treeheight_col = 30,
+         main = 'Module-Lipid Category relationships',
+         heatmap_legend_param = list(title = 'Correlation'))
+dev.off()
+
+# 模块特征关联差异代谢物
+difference <- map(list.files('../../Lipid_SFTS_Mus_Liver/difference', full.names = T),
+                  ~ read.delim(.x) %>% filter(qvalue < 0.05 & VIP > 1 & Fold.Change > 2))
+
+names <- map(difference, ~ pull(.x, Metabolite.ID)) %>% 
+  purrr::reduce(~ c(.x, .y)) %>% 
+  table %>% 
+  data.frame() %>% 
+  rename(name = '.') %>% 
+  filter(Freq > 3)
+
+class_prof <- read.xlsx('../../Lipid_SFTS_Mus_Liver/data.xlsx', sheet = 'profile', rowNames = T) %>% 
+  t %>% data.frame(check.names = F)
+class_prof <- class_prof[colnames(fpkm), names$name]
+
+moduleTraitCor <- cor(MEs, class_prof, use = 'p')
+moduleTraitPvalue <- corPvalueStudent(moduleTraitCor, nSamples)
+
+textMatrix <- paste(signif(moduleTraitCor, 2), ' ', 
+                    apply(moduleTraitPvalue, 2, \(x) add_plab(x)), sep = '') %>% 
+  gsub('\\(\\)', '', .)
+dim(textMatrix) <- dim(moduleTraitCor)
+rownames(textMatrix) = rownames(moduleTraitPvalue)
+colnames(textMatrix) = colnames(moduleTraitPvalue)
+
+pdf('WGCNA/Heatmap_ME_Lipid_diff_CPD.pdf', width = 65, height = 10)
+pheatmap(moduleTraitCor, 
+         cellwidth = 30, cellheight = 20,
+         color = colorRampPalette(c("#3288bd", "#ffffff", "#d53e4f"))(100),
+         border_color = 'white', border_gp = gpar(col = 'black'),
+         display_numbers = textMatrix, number_color = 'black', 
+         treeheight_row = 30, treeheight_col = 30,
+         main = 'Module-Lipid Category relationships',
+         heatmap_legend_param = list(title = 'Correlation'))
+dev.off()
+
+#### ME enriched ####
+library(org.Mm.eg.db)
+
+module <- data.frame(name = names(net$colors), ME = moduleColors) %>% 
+  mutate(ME = paste0('ME', ME))
+write.xlsx(module, 'WGCNA/ME_gene.xlsx')
+module <- split(module$name, module$ME)
+
+
+gene_info <- AnnotationDbi::select(org.Mm.eg.db, keys = rownames(fpkm), 
+                                   keytype = 'SYMBOL', columns = c('ENTREZID'))
+
+eKEGGs <- map(module, ~ enrichKEGG(gene_info$ENTREZID[match(.x, gene_info$SYMBOL)], 
+                                   organism = 'mmu', pvalueCutoff = 1) %>% 
+                data.frame())
+write.xlsx(eKEGGs, 'ME_eKEGG.xlsx')
+
+eGOs <- map(module, ~ enrichGO(.x, 'org.Mm.eg.db', keyType = 'SYMBOL', 
+                               pvalueCutoff = 1, ont = 'ALL') %>% 
+              data.frame()) 
+write.xlsx(eGOs, 'ME_eGO.xlsx')
+```

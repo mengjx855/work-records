@@ -1,0 +1,265 @@
+---
+title: "Pig gut core-microbiota analysis - enterotype analysis - focus enterotype difference"
+author: "Jinxin Meng"
+date: "2025-08-20"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## enterotype analysis
+```{R}
+#### alpha-div ####
+source('/data/mengjx/R_proj/R_func/diversity.R')
+
+profile <- readRDS('data/filtered_profile.t.f.rds')
+rownames(profile) <- paste0('PIG_', stringr::str_extract(rownames(profile), 'GENOME\\d+'))
+tree <- ape::read.tree('data/RAxML_bestTree.species_faa_refined.renamed.tre')
+cluster <- read.delim('ent_g.ComBat_withCov/PAM_3cluster.data.tsv')
+
+data <- map(c('chao1','richness','shannon','simpson','pd'), ~
+              calcu_alpha(profile, method = .x, out_colnames = .x, tree = tree)) %>% 
+  reduce(~ left_join(.x, .y, by = 'sample'))
+
+# saveRDS(data, 'ent_g.ComBat_withCov/alpha_div/div_alpha.data.rds')
+# write.xlsx(data, 'ent_g.ComBat_withCov/alpha_div/div_alpha.data.xlsx')
+data <- readRDS('ent_g.ComBat_withCov/alpha_div/div_alpha.data.rds')
+
+plot_data <- left_join(data, cluster, by = 'sample') %>% 
+  mutate(group = paste0('ET-', cluster))
+
+plots <- map(c('chao1','richness','shannon','simpson','pd'), ~ {
+  ggboxplot(plot_data, 'group', .x, fill = 'group', width = .7, legend = 'none', 
+            palette = c('#80b1d3','#b3de69','#fdb462'), outliers = F, xlab = '',
+            title = .x, ylab = stringr::str_to_title(paste0(.x, ' index'))) +
+    stat_compare_means(comparisons = list(c('ET-1', 'ET-2'), c('ET-1', 'ET-3'), c('ET-2', 'ET-3')), 
+                       method = 'wilcox', tip.length = .02, step.increase = .05, vjust = .9,
+                       label = 'p.signif') +
+    theme(aspect.ratio = 3/2,
+          axis.ticks.length = unit(2, 'mm'),
+          axis.text = element_text(size = 12),
+          axis.title = element_text(size = 12),
+          plot.title = element_text(face = 'bold', size = 12, hjust = .5)) } )
+cowplot::plot_grid(plotlist = plots, align = 'v', nrow = 1)
+ggsave('ent_g.ComBat_withCov/alpha_div/div_alpha.et.boxplots.pdf', width = 14, height = 4)
+
+#### MEM ####
+library(ggClusterNet)
+library(igraph)
+library(ggraph)
+library(tidygraph)
+source('/data/mengjx/R_proj/R_func/public/info.centrality.R')
+
+# profile <- fread('data/filtered_profile.g.ComBat.withCov.tsv') %>% column_to_rownames('name')
+# cluster <- read.delim('ent_g.ComBat_withCov/PAM_3cluster.data.tsv')
+# profile[,cluster[cluster$cluster == 3, 'sample']] %>% 
+#   rownames_to_column('name') %>% 
+#   write.table('ent_g.ComBat_withCov/MEN/prof.ET-3.tsv', sep = '\t', quote = F, row.names = F)
+
+# 构建网络
+edges <- fread('ent_g.ComBat_withCov/MEN/prof.ET-3.corr_long.tsv', sep = '\t') %>% 
+  filter(padj < 0.05 & abs(corr) > 0.6) %>% 
+  rename(from = 1, to = 2, weight = 3) %>% 
+  mutate(weight = abs(weight))
+nodes <- data.frame(row.names = unique(c(edges$from, edges$to)), 
+                    node = unique(c(edges$from, edges$to)))
+g <- graph_from_data_frame(edges, directed = F, vertices = nodes)
+
+node_vul_3 <- info.centrality.vertex(g)
+mean(node_vul)
+# ET-1: 0.09777123
+# ET-2: 0.07545758
+# ET-3: 0.261993
+
+# 模块识别
+set.seed(2025)
+module <- cluster_fast_greedy(g, weights = abs(E(g)$weight))
+V(g)$module <- as.character(membership(module))
+
+# 布局
+layout <- data.frame(layout_with_fr(g)) %>% 
+  rename_all(~ c('X', 'Y'))
+
+plot_nodes <- data.frame(name = V(g)$name, layout, module = V(g)$module) %>% 
+  mutate(module = paste0('module_', module),
+         module = forcats::fct_lump_n(module, n = 10, other_level = 'other', ties.method = 'random'),
+         module = forcats::fct_relevel(module, 'other'),
+         color = c('grey77', RColorBrewer::brewer.pal(10, 'Spectral'))[module])
+plot_edges <- dplyr::select(edges, -padj) %>% 
+  left_join(dplyr::select(plot_nodes, name, X1 = X, Y1 = Y), by = c('from' = 'name')) %>% 
+  left_join(dplyr::select(plot_nodes, name, X2 = X, Y2 = Y), by = c('to' = 'name')) %>% 
+  mutate(color_1 = plot_nodes$color[match(from, plot_nodes$name)],
+         color_2 = plot_nodes$color[match(to, plot_nodes$name)],
+         color = ifelse(color_1 != color_2, 'grey77', color_1),
+         class = as.character(as.numeric(factor(color))))
+
+color_nodes <- distinct(plot_nodes, module, color) %>% pull(color, name = module)
+color_edges <- distinct(plot_edges, class, color) %>% pull(color, name = class)
+
+ggplot() + 
+  geom_segment(aes(x = X1, y = Y1, xend = X2, yend = Y2, color = class), plot_edges,
+               linewidth = .6, show.legend = F) + 
+  scale_colour_manual(values = color_edges) +
+  ggnewscale::new_scale_color() +
+  geom_point(aes(X, Y, color = module), plot_nodes, size = 3, show.legend = F) +
+  scale_colour_manual(values = color_nodes) +
+  scale_x_continuous(breaks = NULL) +
+  scale_y_continuous(breaks = NULL) +
+  labs(title = 'ET-3') +
+  theme(axis.title = element_blank(), 
+        plot.title = element_text(size = 12, hjust = 0.5, face = 'bold'),
+        panel.background = element_rect(fill = 'white',  colour = NA),
+        panel.grid = element_blank(),
+        aspect.ratio = 1, 
+        plot.margin = unit(c(0, 0, 0, 0), 'mm'))
+ggsave('ent_g.ComBat_withCov/MEN/ET-3.net_graph.pdf', width = 5, height = 5)
+write.xlsx(list(node = plot_nodes, edge = plot_edges), 'ent_g.ComBat_withCov/MEN/ET-3.net_graph.xlsx')
+
+net_properties.2(g) %>% 
+  data.frame() %>%
+  rownames_to_column('name') %>% 
+  write.xlsx('ent_g.ComBat_withCov/MEN/ET-3.net_graph.attr.xlsx')
+
+list(read.xlsx('ent_g.ComBat_withCov/MEN/ET-1.net_graph.attr.xlsx') %>% rename(`ET-1` = 2), 
+     read.xlsx('ent_g.ComBat_withCov/MEN/ET-2.net_graph.attr.xlsx') %>% rename(`ET-2` = 2), 
+     read.xlsx('ent_g.ComBat_withCov/MEN/ET-3.net_graph.attr.xlsx') %>% rename(`ET-3` = 2)) %>% 
+  reduce(~ left_join(.x, .y, by = 'name'))
+```
+
+## bash scripts 
+```{sh}
+calcu_correlation.py prof.ET-1.tsv prof.ET-1 --rotate-matrix --trans-clr --n-progress 30 --long-data
+calcu_correlation.py prof.ET-2.tsv prof.ET-2 --rotate-matrix --trans-clr --n-progress 30 --long-data
+calcu_correlation.py prof.ET-3.tsv prof.ET-3 --rotate-matrix --trans-clr --n-progress 30 --long-data
+```
+
+## python scripts
+```{py}
+#### calcu_correlation.py ####
+#!/data/software/miniconda3/envs/jinxin/bin/python
+# Jinxin Meng, mengjx855@163.com
+# created date: 2025-09-09, 17:07:44
+# modified date: 2025-09-09, 17:07:58
+
+import argparse, sys
+import pandas as pd
+import numpy as np
+from scipy.stats import spearmanr, pearsonr
+from statsmodels.stats.multitest import multipletests
+from functools import partial
+import concurrent.futures
+import multiprocessing
+import time
+
+def parse_args():
+    parser = argparse.ArgumentParser(description=parse_args.__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('matrix', type=str, help='input_file, sample as row, feature as column, if not, please set --rotate-matrix')
+    parser.add_argument('out_prefix', type=str, help='prefix of output file')
+    parser.add_argument('--method', metavar='', type=str, default='spearman', choices=['spearman', 'pearson'], help='correlationship [default: spearman]')
+    parser.add_argument('--p-adjust-method', metavar='', type=str, default='fdr_bh', choices=['bonferroni', 'holm', 'fdr_bh'], help='P-value correction method [default: fdr_bh]')
+    parser.add_argument('--trans-clr', action='store_true', help='clr-transformation to remove CoDA effect [default: False]')
+    parser.add_argument('--rotate-matrix', action='store_true', help='rotate the matrix if feature as column and sample as row [default: False]')
+    parser.add_argument('--long-data', action='store_true', help='whether output long-data [default: False]')
+    parser.add_argument('--n-progress', metavar='', type=int, default=None, help='parallel progress [default: max available cores]')
+    parser.add_argument('--quiet', action='store_true', help='output the stats file about substringing. [default: False]')
+    if len(sys.argv) == 1:
+        parser.print_help()
+        parser.exit()
+    args = parser.parse_args()
+    return args
+
+def pairwise_spearman(indices, data=None):
+    i, j = indices
+    vec_x = data.iloc[:, i].values  # 转为numpy数组以提高性能
+    vec_y = data.iloc[:, j].values
+    corr, pval = spearmanr(vec_x, vec_y)
+    return i, j, round(corr, 6), pval
+
+def pairwise_pearson(indices, data=None):
+    i, j = indices
+    vec_x = data.iloc[:, i].values  # 转为numpy数组以提高性能
+    vec_y = data.iloc[:, j].values
+    corr, pval = pearsonr(vec_x, vec_y)
+    return i, j, round(corr, 6), pval
+
+def calcu_correlation(data, method, adj_method, process):
+    num_feature = data.shape[1]
+    name_feature = data.columns
+    # 初始化结果矩阵
+    corr_matrix = np.zeros((num_feature, num_feature))
+    padj_matrix = np.zeros((num_feature, num_feature))
+    # 对角线元素设置为1.0和0.0
+    np.fill_diagonal(corr_matrix, 1.0)
+    np.fill_diagonal(padj_matrix, 0.0)
+
+    # 创建任务列表 - 只计算上三角矩阵以避免重复计算
+    tasks = []
+    for i in range(num_feature):
+        for j in range(i + 1, num_feature):
+            tasks.append((i, j))
+    
+    if process == None:
+        process = multiprocessing.cpu_count()
+
+    if method == 'spearman': # 使用进程池执行计算
+        calcu_spearman = partial(pairwise_spearman, data=data)
+        with concurrent.futures.ProcessPoolExecutor(max_workers=process) as executor:
+            chunksize = max(1, len(tasks) // (process * 10)) # 使用chunksize可以减少进程间通信开销
+            results = list(executor.map(calcu_spearman, tasks, chunksize=chunksize))
+    elif method == 'pearson':
+        calcu_pearson = partial(pairwise_pearson, data=data)
+        with concurrent.futures.ProcessPoolExecutor(max_workers=process) as executor:
+            chunksize = max(1, len(tasks) // (process * 10)) 
+            results = list(executor.map(calcu_pearson, tasks, chunksize=chunksize))
+    else:
+        sys.exit(f'输入的相关性方法{method}有误！')
+
+    pvals = np.array([ x[3] for x in results ])
+    _, padjs, *_ =  multipletests(pvals, alpha=0.05, method=adj_method)
+
+    for x, y in zip(results, padjs): # 填充上下三角
+        i, j, corr, _ = x
+        corr_matrix[i, j] = corr
+        padj_matrix[i, j] = round(y, 6)
+        corr_matrix[j, i] = corr
+        padj_matrix[j, i] = round(y, 6)
+    
+    corr_df = pd.DataFrame(corr_matrix, index=name_feature, columns=name_feature)
+    padj_df = pd.DataFrame(padj_matrix, index=name_feature, columns=name_feature)
+    return corr_df, padj_df
+
+def trans_clr(data, pseudocount=1e-6):
+    return np.log(data + pseudocount) - np.log(data + pseudocount).mean(axis=1).values.reshape(-1, 1)
+
+def main():
+    args = parse_args()
+
+    data = pd.read_csv(args.matrix, sep='\t', index_col=0, header=0)
+    if args.rotate_matrix:
+        data = data.T # 行是样本，列是微生物
+
+    if args.trans_clr:
+        data = trans_clr(data)
+
+    corr_df, padj_df = calcu_correlation(data, args.method, args.p_adjust_method, args.n_progress)
+    corr_df.to_csv(args.out_prefix + '.corr.tsv', sep='\t', index_label='name')
+    padj_df.to_csv(args.out_prefix + '.padj.tsv', sep='\t', index_label='name')
+
+    if args.long_data:
+        num_feature = data.shape[1]
+        name_feature = data.columns
+        with open(args.out_prefix + '.corr_long.tsv', 'w') as out_f:
+            out_f.write('name_x\tname_y\tcorr\tpadj\n')
+            for i in range(num_feature):
+                for j in range(i+1, num_feature):
+                    out_f.write(f'{name_feature[i]}\t{name_feature[j]}\t{corr_df.iloc[i, j]}\t{padj_df.iloc[i, j]}\n')
+
+if __name__ == '__main__':
+    main()
+```
+

@@ -1,0 +1,357 @@
+---
+title: "IBD intestine tissue scRNA-Seq dataset re-analyses"
+author: "Jinxin Meng"
+date: "2024-09-03"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## AyyazA_2019 dataset
+
+```{R}
+library(Seurat)
+library(harmony)
+library(data.table)
+
+sample <- list.files("rawdata/GSE123516_RAW/")
+path <- list.files("rawdata/GSE123516_RAW/", full.names = T)
+
+seurat_list <- lapply(path, \(x) {
+  message(paste0("Processing: ", x))
+  name <- str_split_i(x, "/", 3)
+  count <- Read10X(x)
+  if (length(count) == 2) count = count[[1]]
+  seurat <- Createseuratect(counts = count, project = name, min.cells = 1, min.features = 200)
+  return(seurat)
+  }) 
+
+do.call(rbind, lapply(seurat_list, dim))
+seurat_merge <- merge(seurat_list[[1]], seurat_list[-1], add.cell.ids = sample) 
+seurat_merge <- JoinLayers(seurat_merge)
+
+dim(seurat_merge[["RNA"]]$counts)
+as.data.frame(seurat_merge@assays$RNA$counts[1:10, 1:2])
+head(seurat_merge@meta.data, 10)
+table(seurat_merge$orig.ident) 
+length(seurat_merge$orig.ident)
+
+metadata <- read.delim("GSE123516_metadata.txt")
+metadata <- seurat_merge@meta.data %>% 
+  select(1) %>% 
+  rownames_to_column("name") %>% 
+  left_join(metadata, by = c("orig.ident" = "sample")) %>% 
+  column_to_rownames("name") %>% 
+  select(-orig.ident)
+seurat_merge <- AddMetaData(seurat_merge, metadata)
+saveRDS(seurat_merge, "seurat_merge.rds")
+
+# Seurat QC质控
+# 计算线粒体基因比例
+mito_genes <- rownames(seurat_merge)[grep("^MT-", rownames(seurat_merge), ignore.case = T)]
+seurat_merge <- PercentageFeatureSet(seurat_merge, features = mito_genes, col.name = "percent_mito")
+fivenum(seurat_merge@meta.data$percent_mito)
+# 计算核糖体基因比例
+ribo_genes <- rownames(seurat_merge)[grep("^Rp[sl]", rownames(seurat_merge), ignore.case = T)]
+seurat_merge <- PercentageFeatureSet(seurat_merge,  features = ribo_genes, col.name = "percent_ribo")
+fivenum(seurat_merge@meta.data$percent_ribo)
+# 计算红血细胞基因比例
+Hb_genes <- rownames(seurat_merge)[grep("^Hb[^(p)]", rownames(seurat_merge), ignore.case = T)]
+seurat_merge <- PercentageFeatureSet(seurat_merge,  features = Hb_genes, col.name = "percent_hb")
+fivenum(seurat_merge@meta.data$percent_hb)
+
+# 可视化细胞的上述比例情况
+feats <- c("nFeature_RNA", "nCount_RNA")
+VlnPlot(seurat_merge, group.by = "orig.ident", features = feats, pt.size = 0, ncol = 2) + 
+  NoLegend()
+ggsave("qc/Vlnplot1.pdf", width = 8, height = 5)
+
+feats <- c("percent_mito", "percent_ribo", "percent_hb")
+VlnPlot(seurat_merge, group.by = "orig.ident", features = feats, pt.size = 0, ncol = 3, same.y.lims = T) + 
+  scale_y_continuous(breaks=seq(0, 100, 5)) +
+  NoLegend()
+ggsave("qc/Vlnplot2.pdf", width = 9, height = 5)
+
+FeatureScatter(seurat_merge, "nCount_RNA", "nFeature_RNA", group.by = "orig.ident", pt.size = 0.5)
+ggsave("qc/Scatterplot.pdf", width = 7, height = 5)
+
+# 筛选的标准是：percent_mito < 25，percent_ribo > 3，percent_hb < 1
+selected_cell <- reduce(list(WhichCells(seurat_merge, expression = percent_mito < 25), 
+                             WhichCells(seurat_merge, expression = percent_ribo > 3),
+                             WhichCells(seurat_merge, expression = percent_hb < 1)),
+                             \(x, y) base::intersect(x, y))
+seurat_merge_qc <- subset(seurat_merge, cells = selected_cell)
+
+# 统计
+feats <- c("nFeature_RNA", "nCount_RNA")
+VlnPlot(seurat_merge_qc, group.by = "orig.ident", features = feats, pt.size = 0, ncol = 2) + 
+  NoLegend()
+ggsave("qc/Vlnplot1.f.pdf", height = 5, width = 8)
+
+feats <- c("percent_mito", "percent_ribo", "percent_hb")
+VlnPlot(seurat_merge_qc, group.by = "orig.ident", features = feats, pt.size = 0, ncol = 3) + 
+  NoLegend()
+ggsave("qc/Vlnplot2.f.pdf", height = 5, width = 9) 
+
+seurat_merge_qc <- NormalizeData(seurat_merge_qc, normalization.method = "LogNormalize", scale.factor = 1e4) 
+seurat_merge_qc <- FindVariableFeatures(seurat_merge_qc)
+VariableFeaturePlot(seurat_merge_qc) 
+seurat_merge_qc <- ScaleData(seurat_merge_qc)
+seurat_merge_qc <- RunPCA(seurat_merge_qc, features = VariableFeatures(object = seurat_merge_qc))
+VizDimLoadings(seurat_merge_qc, dims = 1:2, reduction = "pca")
+DimPlot(seurat_merge_qc, reduction = "pca") + NoLegend()
+DimHeatmap(seurat_merge_qc, dims = 1:12, cells = 500, balanced = TRUE)
+seurat_merge_qc <- RunHarmony(seurat_merge_qc, "orig.ident")
+seurat_merge_qc <- RunUMAP(seurat_merge_qc, dims = 1:15, reduction = "harmony")
+DimPlot(seurat_merge_qc, reduction = "umap", label = F)
+seurat_merge_qc <- RunTSNE(seurat_merge_qc, dims = 1:15, reduction = "harmony")
+DimPlot(seurat_merge_qc, reduction = "tsne", label = F) 
+saveRDS(seurat_merge_qc, "seurat_merge.qc.rds")
+
+# 细胞聚类
+seurat <- FindNeighbors(seurat_merge_qc, reduction = "harmony", dims = 1:15) 
+seurat <- FindClusters(seurat, resolution = c(seq(0, 2, .1))) # 探究0~2，间隔为0.2
+plot_list <- map2(paste0("RNA_snn_res.", seq(0, 2, .1)), paste0("louvain_", seq(0, 2, .1)),
+    \(x, y) DimPlot(seurat, reduction = "tsne", group.by = x, label = T) + ggtitle(y))
+
+plot_grid(plotlist = plot_list, nrow = 7)
+ggsave("cluster/tSNE_resolutions.pdf", width = 19, height = 35)
+
+library(clustree)
+clustree(seurat@meta.data, prefix = "RNA_snn_res.", , edge_width = .5)
+ggsave("cluster/tree_resolutions.pdf", width = 20, height = 6)
+
+saveRDS(seurat, "cluster/seurat_cluster.rds")
+
+# 细胞类型注释和差异分析
+seurat <- readRDS("cluster/seurat_cluster.rds")
+snn = 1.0
+seurat <- SetIdent(seurat, value = paste0("RNA_snn_res.", snn))
+
+# 找到所有差异表达基因
+allmarkers <- FindAllMarkers(seurat, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+write.table(allmarkers, paste0("cluster/snn.", snn, ".allmarkers.diff.tsv"), sep = "\t", quote = F, row.names = F)
+
+# 提取每个簇中具有最显著差异表达的前5个基因
+top5_markers <- allmarkers %>%
+  group_by(cluster) %>%
+  top_n(n = 5, wt = avg_log2FC)
+
+# 创建基因的Dot Plot
+DotPlot(seurat, features = unique(top5_markers$gene)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, size = 8, hjust = 1)) +
+  NoLegend()
+ggsave(paste0("cluster/snn.", snn, ".cell.cluster.scatter.pdf"), width = 12, height = 5)
+
+# 创建基因的Heatmap
+DoHeatmap(seurat, features = unique(top5_markers$gene)) +
+  theme(axis.text.y = ggplot2::element_text(size = 8)) + 
+  NoLegend()
+ggsave(paste0("cluster/snn.", snn, ".cell.cluster.heatmap.pdf"), width = 12, height = 5)
+
+# 选择snn 1.0
+
+markergenes <- "Lgr5"
+FeaturePlot(seurat, features = markergenes, reduction = "tsne")
+ggsave("cluster/tSNE_lgr5.pdf", width = 6, height = 5)
+
+allmarkers %>% 
+  filter(gene == "Lgr5") %>%
+  mutate(pval = p_val_adj) %>% 
+  add_plab() %>% 
+  ggbarplot("cluster", "avg_log2FC", fill = "cluster", sort.val = "desc", sort.by.groups = F,
+            label = .$plab, lab.col = "red", palette = "Set2", legend = "none", xlab = "Cluster ID",
+            ylab = "lgr5 avg_log2FC") +
+  coord_fixed(ratio = .75)
+ggsave("cluster/lgr5.diff.pdf", width = 4)
+
+allmarkers %>% 
+  filter(gene %in% c("Lgr5", "Hmgcs2", "Ppara")) %>% 
+  mutate(pval = p_val_adj) %>% 
+  add_plab() %>% 
+  ggbarplot("gene", "avg_log2FC", fill = "gene", palette = "Set2", legend = "none",
+            ylab = "avg_log2FC", x.text.angle = 90, xlab = "") +
+  geom_hline(yintercept = 1, lty = "dashed", linewidth = .4) +
+  facet_wrap(vars(cluster), nrow = 2) +
+  coord_fixed(ratio = 1)
+ggsave("cluster/lgr5.diff2.pdf", height = 5, width = 5)
+
+# 细胞数量
+names(seurat@meta.data)
+DimPlot(seurat, split.by = "sample_title", reduction = "tsne")
+ggsave("cluster/cell.count.tSNE.pdf", height = 5, width = 20)
+
+seurat@meta.data %>% 
+  select(sample = sample_title, cluster = RNA_snn_res.1) %>%
+  group_by(sample, cluster) %>% 
+  summarise(n = n()) %>%
+  ggbarplot("sample", "n", fill = "sample", palette = "Set2", legend = "none",
+            ylab = "cell count", xlab = "", x.text.angle = 90) +
+  facet_wrap(vars(cluster), nrow = 3)
+ggsave("cluster/cell.count.barplot.pdf", height = 9, width = 12)
+
+# 细胞内差异基因分析
+cell_cluster <- subset(seurat, RNA_snn_res.1 == "19")
+table(seurat$RNA_snn_res.1)
+
+seurat@meta.data$comparison <- paste0(seurat@meta.data$RNA_snn_res.1, "_", gsub(" ", "_", seurat@meta.data$sample_title))
+
+Idents(seurat) <- "comparison"
+x <- FindMarkers(seurat, ident.1 = "19_Crypts-Irradiated", ident.2 = "19_Crypts-Normal", verbose = F) %>% 
+  rownames_to_column("name")
+```
+
+## ThomasMF_2024 
+```{R}
+# read 10X h5
+samples <- list.files("rawdata/GSE206301_GEX_h5/")
+files <- list.files("rawdata/GSE206301_GEX_h5/", full.names = T)
+
+seurat_list <- lapply(files, \(x) {
+  message(paste0("Processing: ", x))
+  name <- str_split_i(x, "/", 3) %>% 
+    str_split_i(., "\\.", 1)
+  count <- Read10X_h5(x)
+  seurat <- CreateSeuratObject(counts = count, project = name, min.cells = 1, min.features = 100)
+  return(seurat)
+  }) 
+
+do.call(rbind, lapply(seurat_list, dim))
+seurat_merge <- merge(seurat_list[[1]], seurat_list[-1], add.cell.ids = samples) 
+
+# Seurat QC质控
+mito_genes <- rownames(seurat_merge)[grep("^MT-", rownames(seurat_merge), ignore.case = T)]
+seurat_merge <- PercentageFeatureSet(seurat_merge, features = mito_genes, col.name = "percent_mito")
+fivenum(seurat_merge@meta.data$percent_mito)
+ribo_genes <- rownames(seurat_merge)[grep("^Rp[sl]", rownames(seurat_merge), ignore.case = T)]
+seurat_merge <- PercentageFeatureSet(seurat_merge,  features = ribo_genes, col.name = "percent_ribo")
+fivenum(seurat_merge@meta.data$percent_ribo)
+Hb_genes <- rownames(seurat_merge)[grep("^Hb[^(p)]", rownames(seurat_merge), ignore.case = T)]
+seurat_merge <- PercentageFeatureSet(seurat_merge,  features = Hb_genes, col.name = "percent_hb")
+fivenum(seurat_merge@meta.data$percent_hb)
+feats <- c("nFeature_RNA", "nCount_RNA")
+VlnPlot(seurat_merge, group.by = "orig.ident", features = feats, pt.size = 0, ncol = 2) + 
+  NoLegend()
+ggsave("qc/Vlnplot1.pdf", width = 8, height = 5)
+
+feats <- c("percent_mito", "percent_ribo", "percent_hb")
+VlnPlot(seurat_merge, group.by = "orig.ident", features = feats, pt.size = 0, ncol = 3, same.y.lims = T) + 
+  scale_y_continuous(breaks=seq(0, 100, 5)) +
+  NoLegend()
+ggsave("qc/Vlnplot2.pdf", width = 9, height = 5)
+
+FeatureScatter(seurat_merge, "nCount_RNA", "nFeature_RNA", group.by = "orig.ident", pt.size = 0.5)
+ggsave("qc/Scatterplot.pdf", width = 7, height = 5)
+
+# 我们筛选的标准是：percent_mito < 25，percent_ribo > 3，percent_hb < 1
+selected_cell <- reduce(list(WhichCells(seurat_merge, expression = percent_mito < 25), 
+                             WhichCells(seurat_merge, expression = percent_ribo > 3),
+                             WhichCells(seurat_merge, expression = percent_hb < 1)),
+                             \(x, y) base::intersect(x, y))
+seurat_merge_qc <- subset(seurat_merge, cells = selected_cell)
+feats <- c("nFeature_RNA", "nCount_RNA")
+VlnPlot(seurat_merge_qc, group.by = "orig.ident", features = feats, pt.size = 0, ncol = 2) + 
+  NoLegend()
+ggsave("qc/Vlnplot1.f.pdf", height = 5, width = 8)
+
+feats <- c("percent_mito", "percent_ribo", "percent_hb")
+VlnPlot(seurat_merge_qc, group.by = "orig.ident", features = feats, pt.size = 0, ncol = 3) + 
+  NoLegend()
+ggsave("qc/Vlnplot2.f.pdf", height = 5, width = 9) 
+
+# 降维聚类
+seurat_merge_qc <- NormalizeData(seurat_merge_qc, normalization.method = "LogNormalize", scale.factor = 1e4) 
+seurat_merge_qc <- FindVariableFeatures(seurat_merge_qc)
+VariableFeaturePlot(seurat_merge_qc) 
+seurat_merge_qc <- ScaleData(seurat_merge_qc)
+seurat_merge_qc <- RunPCA(seurat_merge_qc, features = VariableFeatures(object = seurat_merge_qc))
+VizDimLoadings(seurat_merge_qc, dims = 1:2, reduction = "pca")
+DimPlot(seurat_merge_qc, reduction = "pca") + NoLegend()
+DimHeatmap(seurat_merge_qc, dims = 1:12, cells = 500, balanced = TRUE)
+seurat_merge_qc <- RunHarmony(seurat_merge_qc, "orig.ident")
+seurat_merge_qc <- RunUMAP(seurat_merge_qc, dims = 1:15, reduction = "harmony")
+DimPlot(seurat_merge_qc, reduction = "umap", label = F)
+seurat_merge_qc <- RunTSNE(seurat_merge_qc, dims = 1:15, reduction = "harmony")
+DimPlot(seurat_merge_qc, reduction = "tsne", label = F) 
+
+# 细胞聚类
+seurat_merge_qc <- readRDS("seurat_merge.qc.rds")
+seurat <- FindNeighbors(seurat_merge_qc, reduction = "harmony", dims = 1:15) 
+seurat <- FindClusters(seurat, resolution = c(seq(0, 2, .1))) # 探究0~2，间隔为0.2
+
+plot_list <- map2(paste0("RNA_snn_res.", seq(0, 2, .1)), paste0("louvain_", seq(0, 2, .1)),
+    \(x, y) DimPlot(seurat, reduction = "tsne", group.by = x, label = T) + ggtitle(y))
+
+plot_grid(plotlist = plot_list, nrow = 7)
+ggsave("cluster/tSNE_resolutions.pdf", width = 19, height = 35)
+
+library(clustree)
+clustree(seurat@meta.data, prefix = "RNA_snn_res.", , edge_width = .5)
+ggsave("cluster/tree_resolutions.pdf", width = 20, height = 6)
+
+saveRDS(seurat, "cluster/seurat_cluster.rds")
+
+# 细胞类型注释和差异分析
+seurat <- readRDS("cluster/seurat_cluster.rds")
+snn = 1.0
+seurat <- SetIdent(seurat, value = paste0("RNA_snn_res.", snn))
+allmarkers <- FindAllMarkers(seurat, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+write.table(allmarkers, paste0("cluster/snn.", snn, ".allmarkers.diff.tsv"), sep = "\t", quote = F, row.names = F)
+top5_markers <- allmarkers %>%
+  group_by(cluster) %>%
+  top_n(n = 5, wt = avg_log2FC)
+DotPlot(seurat, features = unique(top5_markers$gene)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, size = 8, hjust = 1)) +
+  NoLegend()
+ggsave(paste0("cluster/snn.", snn, ".cell.cluster.scatter.pdf"), width = 12, height = 5)
+DoHeatmap(seurat, features = unique(top5_markers$gene)) +
+  theme(axis.text.y = ggplot2::element_text(size = 8)) + 
+  NoLegend()
+ggsave(paste0("cluster/snn.", snn, ".cell.cluster.heatmap.pdf"), width = 12, height = 5)
+
+markergenes <- "Lgr5"
+FeaturePlot(seurat, features = markergenes, reduction = "tsne")
+ggsave("cluster/tSNE_lgr5.pdf", width = 6, height = 5)
+
+allmarkers %>% 
+  filter(gene == "Lgr5") %>%
+  mutate(pval = p_val_adj) %>% 
+  add_plab() %>% 
+  ggbarplot("cluster", "avg_log2FC", fill = "cluster", sort.val = "desc", sort.by.groups = F,
+            label = .$plab, lab.col = "red", palette = "Set2", legend = "none", xlab = "Cluster ID",
+            ylab = "lgr5 avg_log2FC") +
+  coord_fixed(ratio = .75)
+ggsave("cluster/lgr5.diff.pdf", width = 4)
+
+allmarkers %>% 
+  filter(gene %in% c("Lgr5", "Hmgcs2", "Ppara")) %>% 
+  mutate(pval = p_val_adj) %>% 
+  add_plab() %>% 
+  ggbarplot("gene", "avg_log2FC", fill = "gene", palette = "Set2", legend = "none",
+            ylab = "avg_log2FC", x.text.angle = 90, xlab = "") +
+  geom_hline(yintercept = 1, lty = "dashed", linewidth = .4) +
+  facet_wrap(vars(cluster), nrow = 2) +
+  coord_fixed(ratio = 1)
+ggsave("cluster/lgr5.diff2.pdf", height = 5, width = 5)
+
+# 细胞数量
+names(seurat@meta.data)
+DimPlot(seurat, split.by = "sample_title", reduction = "tsne")
+ggsave("cluster/cell.count.tSNE.pdf", height = 5, width = 20)
+
+seurat@meta.data %>% 
+  select(sample = sample_title, cluster = RNA_snn_res.1) %>%
+  group_by(sample, cluster) %>% 
+  summarise(n = n()) %>%
+  ggbarplot("sample", "n", fill = "sample", palette = "Set2", legend = "none",
+            ylab = "cell count", xlab = "", x.text.angle = 90) +
+  facet_wrap(vars(cluster), nrow = 3)
+ggsave("cluster/cell.count.barplot.pdf", height = 9, width = 12)
+```
+
+

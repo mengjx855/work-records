@@ -1,0 +1,98 @@
+---
+title: "BC Genomics IPA metabolism key enzyme"
+author: "Jinxin Meng"
+date: "2024-08-30"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## key enzyme alignment
+
+```{bash}
+# grep ref seq and rename id
+seqkit grep -r -f Csp.key_gene.tsv ref_seqs/Csp.GCF_000155085.1.ffn > Csp.key_gene.ffn
+seqkit grep -r -f Csp.key_gene.tsv ref_seqs/Csp.GCF_000155085.1.faa > Csp.key_gene.faa
+
+# blast
+# makeblastdb -in Csp.key_gene.ffn -out Csp.key_gene.ffn -dbtype nucl
+makeblastdb -in Csp.key_gene.faa -out Csp.key_gene.faa -dbtype prot
+blastp -query ref_seqs/Bco.GCF_034355335.1.faa -db Csp.key_gene.faa -evalue 1e-5 -max_target_seqs 5 -num_threads 10 -outfmt 6 -out Bco_faa.btp
+blastx -query ref_seqs/Bco.GCF_034355335.1.ffn -db Csp.key_gene.faa -evalue 1e-5 -max_target_seqs 5 -num_threads 10 -outfmt 6 -out Bco_ffn.btp
+blastx -query ref_seqs/Bco.GCF_034355335.1.fna -db Csp.key_gene.faa -evalue 1e-5 -max_target_seqs 5 -num_threads 10 -outfmt 6 -out Bco_fna.btp
+blastp -query ref_seqs/Eco.GCF_000005845.2.faa -db Csp.key_gene.faa -evalue 1e-5 -max_target_seqs 5 -num_threads 10 -outfmt 6 -out Eco_faa.btp
+blastx -query ref_seqs/Eco.GCF_000005845.2.ffn -db Csp.key_gene.faa -evalue 1e-5 -max_target_seqs 5 -num_threads 10 -outfmt 6 -out Eco_ffn.btp 
+blastx -query ref_seqs/Eco.GCF_000005845.2.fna -db Csp.key_gene.faa -evalue 1e-5 -max_target_seqs 5 -num_threads 10 -outfmt 6 -out Eco_fna.btp
+
+# acdA
+seqkit grep -r -p 'acdA' Csp.key_gene.faa | seqkit replace -p "^" -r "C.sporogenes|" > key_acdA.faa
+cat Bco_faa.btp | grep acdA | sort -rk 3 | cut -f1 | head -1 | seqkit grep -f - ref_seqs/Bco.GCF_034355335.1.faa | seqkit replace -p " .*" -r "|acdA" | seqkit replace -p "^" -r "B.coccoides|" >> key_acdA.faa
+cat Eco_faa.btp | grep acdA | sort -rk 3 | cut -f1 | head -1 | seqkit grep -f - ref_seqs/Eco.GCF_000005845.2.faa | seqkit replace -p " .*" -r "|acdA" | seqkit replace -p "^" -r "E.coli|" >> key_acdA.faa
+muscle -align key_acdA.faa -output key_acdA.msa
+trimal -in key_acdA.msa -out key_acdA.msa.trim
+# fldH
+seqkit grep -r -p 'fldH' Csp.key_gene.faa | seqkit replace -p "^" -r "C.sporogenes|" > key_fldH.faa
+cat Bco_faa.btp | grep fldH | sort -rk 3 | cut -f1 | head -1 | seqkit grep -f - ref_seqs/Bco.GCF_034355335.1.faa | seqkit replace -p " .*" -r "|fldH" | seqkit replace -p "^" -r "B.coccoides|" >> key_fldH.faa
+cat Eco_faa.btp | grep fldH | sort -rk 3 | cut -f1 | head -1 | seqkit grep -f - ref_seqs/Eco.GCF_000005845.2.faa | seqkit replace -p " .*" -r "|fldH" | seqkit replace -p "^" -r "E.coli|" >> key_fldH.faa
+muscle -align key_fldH.faa -output key_fldH.msa
+trimal -in key_fldH.msa -out key_fldH.msa.trim
+# fldC
+seqkit grep -r -p 'fldC' Csp.key_gene.faa | seqkit replace -p "^" -r "C.sporogenes|" > key_fldC.faa
+cat Bco_faa.btp | grep fldC | sort -rk 3 | cut -f1 | head -1 | seqkit grep -f - ref_seqs/Bco.GCF_034355335.1.faa | seqkit replace -p " .*" -r "|fldC" | seqkit replace -p "^" -r "B.coccoides|" >> key_fldC.faa
+cat Eco_faa.btp | grep fldC | sort -rk 3 | cut -f1 | head -1 | seqkit grep -f - ref_seqs/Eco.GCF_000005845.2.faa | seqkit replace -p " .*" -r "|fldC" | seqkit replace -p "^" -r "E.coli|" >> key_fldC.faa
+muscle -align key_fldC.faa -output key_fldC.msa
+trimal -in key_fldC.msa -out key_fldC.msa.trim
+```
+
+## MSA visualization
+
+```{R}
+msa <- Biostrings::readAAMultipleAlignment('pipeline/key_acdA.msa.trim') %>% 
+  as.character() %>% 
+  as.list() %>% 
+  map2_dfc(., names(.), \(x, y) data.frame(aa = unlist(str_split(x, ''))) %>% dplyr::rename(!!y := aa)) %>% 
+  rownames_to_column('loc')
+  
+# fldC seq(0, 400, 80), seq(80, 480, 80)
+# fldH seq(0, 320, 80), seq(80, 400, 80)
+# acdA seq(0, 320, 80), seq(80, 400, 80)
+
+data <- map2(seq(0, 320, 80), seq(80, 400, 80), \(x, y)
+     filter(msa, loc %in% seq(x + 1, y, 1)) %>% 
+       gather(key = 'seq', value = 'aa', -loc) %>% 
+       mutate(loc = factor(loc, seq(x + 1, y, 1)))) %>% 
+  setNames(paste0('seq', 1:5))
+
+aa_col <- c('E' = '#ff6d6d', 'D' = '#ff6d6d', 'P' = '#f2be3c', 'A' = '#f2be3c', 'V' = '#f2be3c',
+            'M' = '#f2be3c', 'L' = '#f2be3c', 'I' = '#f2be3c', 'G' = '#f2be3c', 'K' = '#769dcc',
+            'R' = '#769dcc', 'H' = '#769dcc', 'N' = '#74ce98', 'T' = '#74ce98', 'C' = '#74ce98',
+            'Q' = '#74ce98', 'S' = '#74ce98', 'F' = '#ffff66', 'Y' = '#ffff66', 'W' = '#ffff66',
+            '' = '#ffffff', ' ' = 'grey95')
+
+map(data, \(x) 
+    ggplot(x, aes(loc, seq, fill = aa)) +
+  geom_tile(color = 'grey', show.legend = F) +
+  geom_text(aes(label = aa), size = 1.8) +
+  labs(x = '', y = '') +
+  scale_x_discrete(breaks = c(as.character(min(as.numeric(as.character(x$loc)))),
+                              as.character(max(as.numeric(as.character(x$loc))))),
+                   labels = c(as.character(min(as.numeric(as.character(x$loc)))),
+                              as.character(max(as.numeric(as.character(x$loc)))))) +
+  scale_fill_manual(values = aa_col) +
+  coord_fixed() +
+  theme_pubr() +
+  theme(axis.line = element_blank(),
+        axis.text = element_text(size = 5),
+        axis.ticks = element_blank())
+    ) %>% cowplot::plot_grid(plotlist = ., ncol = 1)
+
+ggsave('key_acdA.msa.trim.pdf', width = 10, height = 6)
+
+plot_msa('pipeline/key_fldH.rmEco.msa.trim', width = 40, font_size = 2)
+ggsave('key_fldH.rmEco.msa.trim.pdf', width = 8, height = 6)
+```

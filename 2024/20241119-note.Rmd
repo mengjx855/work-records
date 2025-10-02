@@ -1,0 +1,116 @@
+---
+title: "STFSV infection BMDM RNASeq"
+author: "Jinxin Meng"
+date: "2024-11-19"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## STFSV infection BMDM RNASeq 
+
+```{R}
+#### data ####
+gp_col <- c('SFTSV_48h' = '#59A14F','Mock_48h' = '#8CD17D','SFTSV_72h' = '#F28E2B','Mock_72h' = '#FFBE7D')
+
+group <- read.delim("../data/group.txt") %>% 
+  mutate(group = factor(group, names(gp_col)))
+profile <- read.delim("../data/profile.txt", row.names = 1)
+profile <- profile[rowSums(profile > 2) > 3, ]
+
+gene_info <- AnnotationDbi::select(org.Mm.eg.db, rownames(profile), keytype = 'ENSEMBL', columns = c("ENTREZID", "SYMBOL"))
+
+#### fpkm ####
+source("/code/R_func/transform_rc.R")
+
+library(TxDb.Mmusculus.UCSC.mm39.knownGene)
+txdb <- TxDb.Mmusculus.UCSC.mm39.knownGene
+gene_ranges <- genes(txdb) # 基因长度获取
+
+gene_length <- data.frame(ENTREZID = names(gene_ranges), length = width(gene_ranges)) %>%
+  left_join(gene_info, by = 'ENTREZID') %>% 
+  filter(!is.na(ENSEMBL)) %>% 
+  dplyr::select(name = ENSEMBL, len = length) %>% 
+  dplyr::group_by(name) %>% 
+  dplyr::slice_max(len, n = 1) %>% 
+  distinct()
+
+fpkm <- rc2fpkm(profile, gene_length) %>% 
+  na.omit() %>% 
+  mutate(name = gene_info$SYMBOL[match(rownames(.), gene_info$ENSEMBL)]) %>% 
+  aggregate(. ~ name, ., mean)
+write.table(fpkm, "../data/profile_fpkm.txt", sep = "\t", quote = F, row.names = F)
+
+#### 差异分析 ####
+metadata <- data.frame(row.names = colnames(profile)) %>%
+  mutate(group = group$group[match(rownames(.), group$sample)],
+         group = factor(group))
+
+dds <- DESeqDataSetFromMatrix(countData = profile, colData = metadata, design = ~ group) # 构建dds对象
+des <- DESeq(dds) # deseqs差异分析
+
+gps <- list( # 构建分组比较对, "group"是group表的第二列名称
+  c("group", "SFTSV_48h", "Mock_48h"),
+  c("group", "SFTSV_72h", "Mock_72h"),
+  c("group", "SFTSV_72h", "SFTSV_48h"),
+  c("group", "Mock_72h", "Mock_48h") )
+
+diff <- map(gps, \(x)
+      data.frame(results(des, contrast = x)) %>%
+        rownames_to_column(var = "name") %>% 
+        mutate(enriched = ifelse(log2FoldChange > 1 & pvalue < 0.05, x[2], 
+                                 ifelse(log2FoldChange < -1 & pvalue < 0.05, x[3], "none")))
+      ) %>% setNames(map_vec(gps, \(x) paste0(x[2:3], collapse = "_vs_")))
+
+saveRDS(diff, "diff/diff.rds")
+openxlsx::write.xlsx(diff, 'diff/diff.xlsx')
+
+#### GSEA 富集分析 KEGG ####
+library(BiocParallel)
+library(enrichplot)
+register(SerialParam())
+
+gseKEGG <- map(diff, \(x)
+               left_join(x, gene_info, by = c("name" = "ENSEMBL")) %>% 
+                 filter(!is.na(ENTREZID)) %>% 
+                 pull(log2FoldChange, name = ENTREZID) %>%
+                 sort(decreasing = T) %>% 
+                 gseKEGG(organism = "mmu", pvalueCutoff = 1) %>% 
+                 data.frame())
+openxlsx::write.xlsx(gseKEGG, 'GSEA/gseKEGG.xlsx')
+saveRDS(gseKEGG, "GSEA/gseKEGG.rds")
+
+#### ORA 富集分析 KEGG ####
+eKEGG <- map(diff, \(x)
+             left_join(x, gene_info, by = c("name" = "ENSEMBL")) %>% 
+               filter(enriched != 'none') %>%
+               filter(!is.na(ENTREZID)) %>% 
+               pull(ENTREZID) %>% 
+               enrichKEGG(organism = 'mmu', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+               data.frame())
+openxlsx::write.xlsx(eKEGG, 'ORA/eKEGG.xlsx')
+saveRDS(eKEGG, 'ORA/eKEGG.rds')
+
+#### 基因表达 ####
+fpkm <- read.delim("../data/profile_fpkm.tsv", row.names = 1)
+
+map(c('Pparg','Jun','Fos'), \(x)
+    data.frame(t(fpkm[x,])) %>% 
+      dplyr::rename(value = 1) %>% 
+      rownames_to_column("sample") %>% 
+      left_join(group, by = "sample") %>% 
+      ggboxplot("group", "value", fill = "group", legend = "none", palette = gp_col, 
+                xlab = '', ylab = paste0('FPKM of ', x), width = .6, x.text.angle = 60) +
+      stat_compare_means(comparisons = list(c('SFTSV_48h','Mock_48h'), c('SFTSV_72h','Mock_72h'), 
+                                            c('SFTSV_48h','SFTSV_72h'), c('Mock_48h', 'Mock_72h')), 
+                         label = "p.signif", method = "t", step.increase = .06, vjust = .8, tip.length = .02) +
+      theme(aspect.ratio = 1)
+) %>% cowplot::plot_grid(plotlist = ., nrow = 1, align = 'v')
+ggsave("diff/gene.fpkm.boxplot.pdf", width = 10, height = 4)
+
+```

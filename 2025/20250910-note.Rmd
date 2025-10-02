@@ -1,0 +1,227 @@
+---
+title: "MGX WGS PEDV Sus feces, samples donated by Dr. LiMH"
+author: "Jinxin Meng"
+date: "2025-09-10"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## pipeline
+
+```{sh}
+# qc
+cat raw_fq.filelist | parallel -j 6 --colsep="\t" run_fastp_rmhost.sh {2},{3} pig clean_fq/{1}
+
+# mpa4
+cat clean_fq.filelist | parallel -j 6 --colsep="\t" run_metaphlan.sh {2},{3} mpa4/{1}
+combine_file_zy_folder_allsample.py -D mpa4/ -suffix .tsv --skip 5 -n 1 -v 3 -o mpa4.sgb.tsv
+cut -f1 ../clean_fq.filelist | parallel -J 6 sgb_to_gtdb_profile.py -i {}.tsv -d /data/database/metaphlan4/mpa_vJun23_CHOCOPhlAnSGB_202403.pkl -o {}.tsv.to_gtdb
+combine_file_zy_folder_allsample.py -D mpa4/ -suffix .tsv.to_gtdb --skip 2 -n 1 -v 2 -o mpa4.gtdb.tsv -s 0
+
+# assembly
+cat clean_fq.filelist | parallel -j 4 --colsep="\t" run_megahit.sh {2},{3} assembly/{1}
+
+# prodigal
+realpath ../assembly/*fa | parallel -j 4 seqkit seq -g -m 500 {} \| seqkit replace -p \".*\" -r \"{/.}.{nr}\" -o {/.}.fa
+ls *fna | parallel -j 6 flow_prodigal.sh {} {/.} 20
+
+# mmseqs 
+cat ../prodigal/*ffn | seqkit seq -g -m 100 | seqkit replace -p " .*" -r "" > gene.ffn
+mmseqs easy-cluster gene.ffn gene . --cluster-mode 2 --cov-mode 1 --min-seq-id 0.95 -c 0.9 --kmer-per-seq-scale 0.8 --threads 112
+seqkit fx2tab -n gene_rep_seq.fasta | sed 's/ //g' | seqkit grep -f - ../prodigal/*faa | seqkit replace -p " .*" -r "" > gene_rep_seq.faa
+
+# gene profile
+minimap2 -d gene_rep_seq.mmi gene_rep_seq.fasta
+cat ../clean_fq.filelist | parallel -j 6 --colsep="\t" ../run_minimap2.sh {2},{3} gene_rep_seq.mmi bam/{1}
+cut -f1 ../clean_fq.filelist | parallel -j 6 samtools coverage bam/{}.sort.bam -o bam/{}.cvg
+combine_file_zy_folder_allsample.py -D bam/ -suffix .cvg -n 1 -v 4 -t 1 -o geneset.rc
+combine_file_zy_folder_allsample.py -D bam/ -suffix .cvg -n 1 -v 6 -t 1 -o geneset.cvg
+profile_rc2tpm.pl geneset.rc geneset.len geneset.tpm
+
+# kegg
+diamond blastp -d /data/database/KEGG/KEGG20230401.dmnd --outfmt 6 --min-score 60 --query-cover 50 --max-target-seqs 10 -p 110 -q ../geneset/gene_rep_seq.faa -o kegg.m8 >/dev/null 2>/dev/null 
+perl -ne 'chomp;@s=split/\t/;if($s[0] ne $a){$s[1]=~/\|(.*)/;print "$s[0]\t$1\n";$a=$s[0]}' kegg.m8 > kegg.tsv
+profile_aggregate_kegg.pl kegg.tsv ../geneset/geneset.tpm kegg.tpm
+kegg_convert_levels.py -i kegg.tpm -mode pathway --rounding -o kegg.tpm
+
+# CAZyme
+diamond blastp -d /data/database/CAZy/CAZyDB.07142024.dmnd --outfmt 6 --min-score 60 --query-cover 50 --max-target-seqs 5 -p 110 -q ../geneset/gene_rep_seq.faa -o CAZyme.m8 > /dev/null 2>/dev/null
+perl -ne 'chomp;@s=split/\t/;if($s[0] ne $a){$s[1]=~/\|(.*)/;print "$s[0]\t$1\n";$a=$s[0]}' CAZyme.m8 > CAZyme.tsv
+profile_aggregate_kegg.pl CAZyme.tsv ../geneset/geneset.tpm CAZyme.tpm
+tidy_CAZyme_profile.py CAZyme.tpm CAZyme.tidy.tpm
+
+# Ffa abundance
+cat clean_fq.filelist | parallel -j 6 --colsep="\t" run_minimap2.ident.sh {2},{3} ref_genome/GCF_012524165.2.fna Ffa_abundance/{1}
+cut -f1 clean_fq.filelist | parallel -j 6 samtools coverage Ffa_abundance/{}.sort.bam -o Ffa_abundance/{}.cvg
+combine_file_zy_folder_allsample.py -D Ffa_abundance -suffix .cvg -n 1 -v 4 -t 1 -o Ffa.rc
+combine_file_zy_folder_allsample.py -D Ffa_abundance -suffix .cvg -n 1 -v 6 -t 1 -o Ffa.cvg
+```
+
+## bash scripts
+```{sh}
+#### flow_prodigal.sh ####
+#!/usr/bin/bash
+
+set -e
+
+if [ $# -lt 2 ] || [ $# -gt 4 ];then
+echo "$0 <fasta> <out_prefix> <threads> <translate_tab|11>"
+echo "        <out_prefix>.faa/gff/ffn"
+exit 127
+fi
+in_f=$1
+out_f=$2
+threads=$3
+translate_tab=${4:-11}
+temp_prodital=${out_f}_$$  # $$ is pid of this script 
+
+mkdir $temp_prodital
+
+parallel -k  -j ${threads} -a ${in_f} --block -1 \
+             --pipe-part --recend '\n' --recstart '>' \
+             "cat | \
+             prodigal -q -d $temp_prodital/{#}.ffn -o $temp_prodital/{#}.gff -p meta -a $temp_prodital/{#}.faa -f gff -g ${translate_tab}"
+cat $temp_prodital/*.faa > $out_f.faa
+cat $temp_prodital/*.ffn > $out_f.ffn
+cat $temp_prodital/*.gff > $out_f.gff
+rm -r $temp_prodital
+```
+
+## python scripts
+
+```{py}
+#### tidy_CAZyme_profile.py ####
+#!/data/software/miniconda3/envs/jinxin/bin/python
+# Jinxin Meng, mengjx855@163.com
+# created date: 2025-09-10, 17:15:27
+# modified date: 2025-09-10, 17:15:27
+
+import pandas as pd
+import re, os, sys
+
+if len(sys.argv) != 3:
+    sys.exit(f'Usage: {os.path.abspath(__file__)} [in_file] [out_file]')
+
+def tidy_CAZyme_profile(in_file, out_file, label='name'):
+    df = pd.read_csv(in_file, sep='\t', index_col=0)
+    result_dict = {}
+
+    for index, value in df.iterrows():
+        if '|' in index: # 如果酶名包含 "|"，则分割并处理
+            names = index.split('|')
+            names = [re.sub(r'_\d+', '', x) for x in names]
+            proportion = 1.0 / len(names)
+            for x in names:
+                if x not in result_dict:
+                    result_dict[x] = value * proportion
+                else:
+                    result_dict[x] += value * proportion
+        else:
+            name = re.sub(r'_\d+', '', index)
+            if name not in result_dict:
+                result_dict[name] = value
+            else:
+                result_dict[name] += value
+
+    data = pd.DataFrame(result_dict).T.round(5)
+    data.to_csv(out_file, sep='\t', index_label='name')
+
+if __name__ == '__main__':
+    tidy_CAZyme_profile(sys.argv[1], sys.argv[2])
+```
+
+## MGX downstream analysis (partial)
+```{R}
+#### mpa4-sgb ####
+library(microeco)
+source('/data/mengjx/R_proj/R_func/calcu_difference.R')
+
+profile <- read.delim('../mpa4.sgb.s.tsv', row.names = 1, check.names = F)
+group <- data.frame(row.names = colnames(profile)) %>% 
+  mutate(group = gsub('-\\d', '', rownames(.)))
+taxa <- read.delim('../mpa4.sgb.taxa.tsv') %>% 
+  dplyr::select(-strain) %>% distinct()
+rownames(taxa) <- taxa$species
+
+dataset <- microtable$new(sample_table = group, otu_table = profile, tax_table = taxa)
+lefse <- trans_diff$new(dataset = dataset, method = 'lefse', group = 'group', alpha = 0.05)
+data <- tidy_LEfSe(lefse$res_diff)
+write.xlsx(data, 'LEfSe.sgb.result.xlsx')
+
+diff <- difference_analysis(profile, rownames_to_column(group, 'sample'), 
+                            comparison = c('PEDV', 'CT'), add_enriched = T)
+write.xlsx(diff, 'diff.sgb.result.xlsx')
+
+#### mpa4-gtdb ####
+profile <- read.delim('../mpa4.gtdb.s.tsv', row.names = 1, check.names = F)
+group <- data.frame(row.names = colnames(profile)) %>% 
+  mutate(group = gsub('-\\d', '', rownames(.)))
+taxa <- read.delim('../mpa4.gtdb.taxa.tsv') %>%
+  filter(species %in% rownames(profile)) %>% distinct()
+rownames(taxa) <- taxa$species
+
+dataset <- microtable$new(sample_table = group, otu_table = profile, tax_table = taxa)
+lefse <- trans_diff$new(dataset = dataset, method = 'lefse', group = 'group', alpha = 0.05)
+data <- tidy_LEfSe(lefse$res_diff)
+write.xlsx(data, 'LEfSe.gtdb.result.xlsx')
+
+diff <- difference_analysis(profile, rownames_to_column(group, 'sample'), 
+                            comparison = c('PEDV', 'CT'), add_enriched = T)
+write.xlsx(diff, 'diff.gtdb.result.xlsx')
+
+profile <- read.delim('../mpa4.gtdb.g.tsv', row.names = 1, check.names = F)
+group <- data.frame(row.names = colnames(profile)) %>% 
+  mutate(group = gsub('-\\d', '', rownames(.)))
+diff <- difference_analysis(profile, rownames_to_column(group, 'sample'), 
+                            comparison = c('PEDV', 'CT'), add_enriched = T)
+
+profile['g__Flavonifractor',] %>% t %>% data.frame() %>% rename(value = 1) %>% 
+  rownames_to_column('sample') %>% left_join(rownames_to_column(group, 'sample'), by = 'sample') %>%
+  ggdensity('value', fill = 'group')
+
+profile['g__Muricomes',] %>% t %>% data.frame() %>% rename(value = 1) %>% 
+  rownames_to_column('sample') %>% left_join(rownames_to_column(group, 'sample'), by = 'sample') %>% 
+  ggdensity('value', fill = 'group')
+
+#### kegg ####
+profile <- fread('../kegg/kegg.tpm') %>% 
+  column_to_rownames('name')
+group <- data.frame(sample = colnames(profile)) %>% 
+  mutate(group = gsub('-\\d', '', sample))
+
+diff <- difference_analysis(profile, group, comparison = c('PEDV', 'CT'))
+data <- mutate(
+  diff, 
+  enriched = ifelse(log2FC > 1 & padj < 0.05, 'PEDV', 
+                    ifelse(log2FC < -1 & padj < 0.05, 'CT', 'none')))
+write.xlsx(data, 'diff.KO.result.xlsx')
+
+# enrichment analysis
+library(clusterProfiler)
+kegg_db <- read.delim('/data/mengjx/database/KEGG/enrichments/KO2path_enrichment_for_microbiome.tsv')
+gene <- filter(data, enriched != 'none') %>% pull(name)
+eKEGG <- enricher(gene, TERM2GENE = kegg_db, maxGSSize = 600, minGSSize = 8, 
+                  pAdjustMethod = 'fdr', pvalueCutoff = 0.2) %>% 
+  data.frame(row.names = NULL)
+write.xlsx(eKEGG, 'diff.KO.eKEGG.result.xlsx')
+
+gene <- filter(data, enriched == 'CT') %>% pull(name)
+eKEGG <- enricher(gene, TERM2GENE = kegg_db, maxGSSize = 600, minGSSize = 8, 
+                  pAdjustMethod = 'fdr', pvalueCutoff = 0.2) %>% 
+  data.frame(row.names = NULL)
+write.xlsx(eKEGG, 'diff.KO.eKEGG.downKO.result.xlsx')
+
+gene <- filter(data, enriched != 'none') %>% 
+  pull(log2FC, name = name) %>% 
+  sort(decreasing = T)
+gseKEGG <- GSEA(gene, minGSSize = 8, maxGSSize = 600, TERM2GENE = kegg_db, 
+                pvalueCutoff = .2, pAdjustMethod = 'fdr') %>% 
+  data.frame(row.names = NULL)
+write.xlsx(gseKEGG, 'diff.KO.gseKEGG.result.xlsx')
+```

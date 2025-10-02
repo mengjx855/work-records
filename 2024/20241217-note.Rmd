@@ -1,0 +1,303 @@
+---
+title: "20241217 RNASeq PLA treat Mus"
+author: "Jinxin Meng"
+date: "2024-12-17"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## PLA Mus RNASeq 
+
+```{R}
+#### metadata ####
+group <- read.delim("../data/mapping.txt")
+profile <- read.delim("../data/profile.txt", row.names = 1)
+profile <- profile[rowSums(profile > 2) >= 3, ] # 过滤基因表达谱，保证每个基因至少在10%样本以上的reads数大于2
+
+#### fpkm ####
+source("/code/R_func/transform_rc.R")
+
+library(TxDb.Mmusculus.UCSC.mm39.knownGene) # 基因组信息
+txdb <- TxDb.Mmusculus.UCSC.mm39.knownGene
+gene_ranges <- genes(txdb) # 基因长度获取
+gene_info <- AnnotationDbi::select(org.Mm.eg.db, keys = rownames(profile), 
+                                   keytype = "ENSEMBL", columns = c("ENTREZID", "SYMBOL")) %>% 
+  left_join(data.frame(ENTREZID = names(gene_ranges), length = width(gene_ranges)), by = "ENTREZID") %>% 
+  filter(!is.na(length))
+
+gene_length <- dplyr::select(gene_info, name = ENSEMBL, len = length) %>% 
+  distinct() %>% 
+  group_by(name) %>% 
+  dplyr::slice_max(len, n = 1)
+
+fpkm <- rc2fpkm(profile, gene_length) %>% 
+  na.omit() %>% 
+  mutate(name = gene_info$SYMBOL[match(rownames(.), gene_info$ENSEMBL)]) %>% 
+  aggregate(. ~ name, ., mean)
+write.table(fpkm, "../data/profile_fpkm.tsv", sep = "\t", quote = F, row.names = F)
+
+#### 差异分析 ####
+metadata <- data.frame(row.names = colnames(profile)) %>%
+  mutate(group = group$group[match(rownames(.), group$sample)],
+         group = factor(group))
+
+dds <- DESeqDataSetFromMatrix(countData = profile, colData = metadata, design = ~ group) # 构建dds对象
+dds <- DESeq(dds)
+
+gps <- list(c("Dub", "PBS"),
+            c("Akk", "PBS"),
+            c("EF", "PBS"),
+            c("BC", "PBS"))
+
+diffs <- map(gps, \(x)
+             results(dds, contrast = c('group', x)) %>% 
+               data.frame() %>%
+               rownames_to_column("name") %>% 
+               mutate(enriched = ifelse(log2FoldChange > 1 & pvalue < 0.05, x[1], 
+                                        ifelse(log2FoldChange < -1 & pvalue < 0.05, x[2], "none")))
+             ) %>% 
+  setNames(map_vec(gps, \(x) paste0(x, collapse = "_vs_")))
+
+saveRDS(diffs, "diffs.rds")
+openxlsx::write.xlsx(diffs, "diffs.xlsx")
+
+#### GSEA 富集分析 KEGG ####
+BiocParallel::register(BiocParallel::SerialParam())
+
+gene_info <- AnnotationDbi::select(org.Mm.eg.db, keys = keys(org.Mm.eg.db), 
+                                   columns = c("ENSEMBL", "ENTREZID", "SYMBOL"))
+
+gseKEGGs <- map(diff, \(x)
+               left_join(x, gene_info, by = c("name" = "ENSEMBL")) %>% 
+                 filter(!is.na(ENTREZID)) %>% 
+                 pull(log2FoldChange, ENTREZID) %>%
+                 sort(decreasing = T) %>% 
+                 gseKEGG(organism = "mmu", pvalueCutoff = 1))
+saveRDS(gseKEGGs, "gseKEGGs.rds")
+
+map(gseKEGGs, \(x) mutate(data.frame(x), Description = gsub(" - Mus.*", "", Description))) %>% 
+  openxlsx::write.xlsx("gseKEGGs.xlsx")
+
+#### GSEA 富集分析 KEGG 气泡图 ####
+gseKEGGs <- readRDS('gseKEGGs.rds') %>% 
+  map(\(x) data.frame(x))
+
+kegg_info <- read.delim("/database/KEGG/br08901.tsv") %>% 
+  mutate(lvC = gsub("map", "mmu", lvC))
+
+cls_col <- c("Cellular Processes" = "#66c2a5", 'Organismal Systems' = "#A6D854",
+             "Metabolism" = "#e78ac3", "Genetic Information Processing" = "#8da0cb", 
+             "Environmental Information Processing" = "#fc8d62")
+
+plot_data <- map_df(names(gseKEGGs), \(x) 
+                    dplyr::filter(data.frame(gseKEGGs[[x]])) %>% 
+                      dplyr::select(name = Description, id = ID, NES, pvalue) %>% 
+                      mutate(name = gsub(' - Mus.*', '', name)) %>% 
+                      data.frame(row.names = NULL) %>% 
+                      add_column(grps = x) ) %>% 
+  left_join(dplyr::select(kegg_info, lvA, lvC), by = c("id" = "lvC")) %>% 
+  filter(lvA %in% names(cls_col)) %>% 
+  arrange(lvA) %>% 
+  mutate(name = factor(name, unique(name)),
+         color = cls_col[lvA],
+         name = glue::glue("<p style='color:{color}'>{name} </p>") ) %>% 
+  mutate(plab = ifelse(pvalue < 0.05, "sig", "no-sig")) %>% 
+  filter(apply)
+
+ggscatter(plot_data, "grps", "name", fill = "NES", shape = 21, 
+          color = "plab", xlab = "", ylab = "") +
+  scale_fill_gradient2(high = "#d53e4f", mid = "#ffffbf", low = "#3288bd") +
+  scale_color_manual(values = c("sig" = "red", "non-sig" = "#ffffff")) +
+  scale_size_continuous(range = c(1, 9)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 6),
+        axis.text.y = ggtext::element_markdown(size = 6),
+        panel.spacing.x = unit(0, "cm"),
+        panel.grid = element_line(linewidth = .3, linetype = "dashed"))
+ggsave("gseKEGGs.all.pdf", width = 5, height = 27)
+
+plot_data <- filter(plot_data, 
+                    name %in% (group_by(plot_data, name, plab) %>% 
+                                 summarise(n = n()) %>% 
+                                 filter(plab == 'sig') %>% 
+                                 pull(name)))
+
+ggscatter(plot_data, "grps", "name", fill = "NES", shape = 21, 
+          color = "plab", xlab = "", ylab = "") +
+  scale_fill_gradient2(high = "#d53e4f", mid = "#ffffbf", low = "#3288bd") +
+  scale_color_manual(values = c("sig" = "red", "non-sig" = "#ffffff")) +
+  scale_size_continuous(range = c(1, 9)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 6),
+        axis.text.y = ggtext::element_markdown(size = 6),
+        panel.spacing.x = unit(0, "cm"),
+        panel.grid = element_line(linewidth = .3, linetype = "dashed"))
+ggsave("gseKEGGs.sig.pdf", width = 4.5, height = 17)
+
+#### ORA 富集分析 KEGG 网络图 ####
+diffs <- readRDS('diffs.rds') %>% 
+  map(\(x) filter(x, enriched != 'none') %>% 
+        left_join(gene_info, by = c('name' = 'ENSEMBL')) %>% 
+        pull(ENTREZID) %>% 
+        na.omit)
+
+eKEGGs <- compareCluster(diffs, 'enrichKEGG', organism = "mmu", pvalueCutoff = 0.05,
+                         pAdjustMethod = 'none')
+saveRDS(eKEGGs, "eKEGGs.rds")
+openxlsx::write.xlsx(data.frame(eKEGGs), "eKEGGs.xlsx")
+
+plot_data <- pairwise_termsim(eKEGGs)
+
+emapplot(plot_data, showCategory = 1000, cex_label_category = .5, 
+         shadowtext = F,cex_line = .3, cex.params = list(category_node = 3)) 
+ggsave('eKEGGs.emap.pdf', width = 10, height = 10)
+
+#### GSEA富集分析 Reactome ####
+source("/code/R_func/calcu_GSA.R")
+library("ReactomePA")
+
+gene_info <- AnnotationDbi::select(org.Mm.eg.db, keys = keys(org.Mm.eg.db), 
+                                   columns = c("ENSEMBL", "ENTREZID", "SYMBOL"))
+
+gseReactome <- map(diffs, \(x)
+                   left_join(x, gene_info, by = c("name" = "ENSEMBL")) %>% 
+                     filter(!is.na(ENTREZID)) %>% 
+                     pull(log2FoldChange, ENTREZID) %>%
+                     sort(decreasing = T) %>% 
+                     gsePathway(organism = "mouse", pvalueCutoff = 1) )
+saveRDS(gseReactome, "gseReactome.rds")
+
+map(gseReactome, \(x) data.frame(x) ) %>% 
+  openxlsx::write.xlsx("gseReactome.xlsx")
+
+reactome_longest_path("R-MMU-6798695")
+
+#### 脂代谢和PPAR通路影响 ####
+library(pathview)
+
+gseKEGG <- readRDS("gseKEGGs.rds")
+
+paths <- c('mmu03320' = 'PPAR signaling pathway',
+           'mmu01212' = 'Fatty acid metabolism', 
+           'mmu00062' = 'Fatty acid elongation', 
+           'mmu00061' = 'Fatty acid biosynthesis', 
+           'mmu00071' = 'Fatty acid degradation', 
+           'mmu01040' = 'Biosynthesis of unsaturated fatty acids')
+
+map2(paths, names(paths), \(x, y)
+     map(names(gseKEGGs), \(i) 
+         gseaplot(gseKEGGs[[i]], geneSetID = y, by = "runningScore", 
+                  color.line = '#66c2a5', color.vline = 'red',
+                  title = paste0(i, " | ", x)) + 
+           labs(subtitle = data.frame(gseKEGG[[i]])[y, c("NES", "pvalue")] %>% 
+                  signif(3) %>% 
+                  paste0(names(.), ": ", .) %>% 
+                  paste(collapse = ", "))) %>% 
+       cowplot::plot_grid(plotlist = ., ncol = 1) ) %>% 
+  cowplot::plot_grid(plotlist = ., nrow = 1)
+ggsave("gseKEGGs.fat.pdf", width = 24, height = 12)
+
+# 通路
+diffs <- readRDS("diffs.rds")
+kegg_info <- download_KEGG("mmu")
+
+map2(paths, names(paths), \(x, y)
+     map(names(diffs), \(i) {
+       suffix <- paste0(gsub(' ', '_', x), '.', gsub('_vs_PBS', '', i))
+       data <- kegg_info$KEGGPATHID2EXTID %>% 
+            filter(from == y) %>% 
+            left_join(gene_info, by = c("to" = "ENTREZID")) %>% 
+            left_join(diffs[[i]], by = c("ENSEMBL" = "name")) %>% 
+            filter(!is.na(log2FoldChange))
+       gene <- structure(data$log2FoldChange, names = data$to)
+       try(pathview(gene.data = gene, pathway.id = y, species = "mmu", 
+                    out.suffix = paste0('fmt_1.', suffix), low = "#abd9e9", high = "#fdae61"))
+       } ) )
+
+map2(paths, names(paths), \(x, y)
+     map(names(diffs), \(i) {
+       suffix <- paste0(gsub(' ', '_', x), '.', gsub('_vs_PBS', '', i))
+       data <- kegg_info$KEGGPATHID2EXTID %>% 
+         filter(from == y) %>% 
+         left_join(gene_info, by = c("to" = "ENTREZID")) %>% 
+         left_join(diffs[[i]], by = c("ENSEMBL" = "name")) %>% 
+         filter(pvalue < 0.05)
+       gene <- structure(data$log2FoldChange, names = data$to)
+       try(pathview(gene.data = gene, pathway.id = y, species = "mmu", 
+                    out.suffix = paste0('fmt_2.', suffix), low = "#abd9e9", high = "#fdae61"))
+     } ) )
+
+# 基因表达
+genes <- c('Ppara','Ppard','Pparg','Ppargc1a','Ppargc1b')
+
+fpkm <- read.delim('../data/profile_fpkm.tsv', row.names = 1)[genes,]
+
+fpkm %>%
+  rownames_to_column("name") %>% 
+  gather(key = "sample", value = "value", -name) %>% 
+  left_join(group, by = "sample") %>% 
+  ggboxplot("group", "value", fill = "group", legend = "none", xlab = "", 
+            ylab = "", palette = "Set2") +
+  facet_wrap(~ name, scale = "free", nrow = 1) +
+  stat_compare_means(ref.group = "EF", method = "t", label = "p.signif", hide.ns = T) +
+  theme(aspect.ratio = 4/3, 
+        strip.background = element_blank())
+ggsave("gene_exp.PPAR.pdf", width = 10, height = 3)
+
+#### 菌定植对其他代谢的影响 ####
+gseKEGGs <- readRDS("gseKEGGs.rds")
+kegg_info <- read.delim("/database/KEGG/v20230401/path_description")
+
+data <- map(gseKEGGs, \(x) 
+            data.frame(x) %>% 
+              left_join(dplyr::select(kegg_info, ID = mmu, category), by = "ID") %>% 
+              filter(category == "Metabolism" & pvalue < 0.05) %>% 
+              dplyr::select(ID, Description, NES, pvalue, p.adjust) %>% 
+              mutate(enriched = ifelse(NES > 0, "BAC", "PBS"),
+                     Description = gsub(' - Mus.*', '', Description)) )
+
+map2(data, names(data), \(x, y)
+     arrange(x, desc(NES)) %>% 
+       mutate(Description = stringi::stri_pad_left(Description, width = 80)) %>% 
+       ggbarplot(x = "Description", y = "NES", fill = "enriched", title = y, legend = "right",
+                 rotate = T, xlab = "", palette = c("BAC" = "#e16f69", PBS = "#339dcd")) +
+       scale_y_continuous(limits = c(-4, 4)) ) %>% 
+  cowplot::plot_grid(plotlist = ., align = "v", ncol = 1, rel_heights = c(25, 35, 9, 30))
+ggsave("gseKEGGs.metabolism.pdf", width = 10, height = 20)
+
+#### 肠道细胞受到怎样的影响 ####
+BiocParallel::register(BiocParallel::SerialParam())
+
+diffs <- readRDS("diffs.rds")
+gene_info <- AnnotationDbi::select(org.Mm.eg.db, keys = keys(org.Mm.eg.db), 
+                                   columns = c("ENSEMBL", "ENTREZID", "SYMBOL"))
+
+lib <- read.delim("../data/cell_library.txt")
+
+gsea <- map(diffs, \(x) 
+            structure(x$log2FoldChange, 
+                      names = gene_info$SYMBOL[match(x$name, gene_info$ENSEMBL)]) %>%
+              sort(decreasing = T) %>% 
+              GSEA(TERM2GENE = lib, pvalueCutoff = 1))
+map(gsea, \(x) x@result) %>% openxlsx::write.xlsx('gsea.cell.xlsx')
+saveRDS(gsea, "gsea.cell.rds")
+
+map(unique(lib$term), \(x) 
+    map(names(diffs), \(y) 
+    gseaplot(gsea[[y]], geneSetID = x, , by = "runningScore", 
+             color.line = '#66c2a5', color.vline = 'red',
+             title = paste0(y, " | ", x)) +
+      labs(subtitle = data.frame(gsea[[y]])[x, c("NES", "pvalue")] %>% 
+             signif(3) %>% 
+             paste0(names(.), ": ", .) %>% 
+             paste(collapse = ", "))) %>% 
+      cowplot::plot_grid(plotlist = ., align = 'v', ncol = 1) ) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', nrow = 1)
+ggsave('gsea.cell.pdf', width = 24, height = 12)
+```

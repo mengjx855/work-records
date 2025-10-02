@@ -1,0 +1,1684 @@
+---
+title: "IBD intestine scRNASeq in public datasets"
+author: "Jinxin Meng"
+date: "2025-01-02"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## AyyazA_2019.Mus
+
+```{R}
+#### read ####
+names <- list.files('data')
+names <- names[grepl('GSM', names)]
+paths <- paste0(list.files('data', full.names = T))
+paths <- paths[grepl('GSM', paths)]
+
+seurats <- map2(paths, names, \(x, y) { 
+  message(paste0('Reading: ', y)) 
+  count <- Read10X(x)
+  CreateSeuratObject(counts = count, project = y, min.cells = 5, min.features = 100) })
+
+seurat <- JoinLayers(merge(seurats[[1]], seurats[-1], add.cell.ids = names))
+saveRDS(seurat, 'seurat.raw.rds')
+
+table(seurat@meta.data$orig.ident)
+# GSM3308717 GSM3308718 GSM3308719 GSM3308720 
+# 4500       4500       4479       4500
+dim(seurat)
+# [1] 16484 17979
+
+#### QC ####
+seurat <- readRDS('seurat.raw.rds')
+
+seurat <- PercentageFeatureSet(seurat, pattern = '^mt-', col.name = 'percent_mt') # 线粒体
+seurat <- PercentageFeatureSet(seurat, pattern = '^Rp[sl]', col.name = 'percent_rb') # 核糖体
+seurat <- PercentageFeatureSet(seurat, pattern = '^Hb[^(p)]', col.name = 'percent_hb') # 血红蛋白
+
+p1 <- VlnPlot(seurat, group.by = 'orig.ident', pt.size = 0, ncol = 2,
+              features = c('nFeature_RNA', 'nCount_RNA')) + NoLegend()
+
+p2 <- VlnPlot(seurat, group.by = 'orig.ident', pt.size = 0, ncol = 3,
+              features = c('percent_mt', 'percent_rb', 'percent_hb')) + 
+  scale_y_continuous(breaks = seq(0, 100, 5)) + NoLegend()
+
+cowplot::plot_grid(p1, p2, ncol = 1, align = 'v')
+ggsave('qc_before.pdf', width = 8, height = 10)
+
+# 细胞过滤
+# IBD 细胞损伤严重，因此，选择不过滤seurat基因
+seurat <- subset(seurat, subset = nFeature_RNA > 100 & nFeature_RNA < 6000 & 
+                   percent_hb < 1)
+
+p1 <- VlnPlot(seurat, group.by = 'orig.ident', pt.size = 0, ncol = 2,
+              features = c('nFeature_RNA', 'nCount_RNA')) + NoLegend()
+
+p2 <- VlnPlot(seurat, group.by = 'orig.ident', pt.size = 0, ncol = 3,
+              features = c('percent_mt', 'percent_rb', 'percent_hb') ) + NoLegend()
+
+cowplot::plot_grid(p1, p2, ncol = 1, align = 'v')
+ggsave('qc_after.pdf', width = 8, height = 10)
+
+dim(seurat)
+# [1] 16484 17303
+
+#### PCA and cluster ####
+seurat <- NormalizeData(seurat, normalization.method = 'LogNormalize', scale.factor = 1e4, verbose = T) # 标准化
+seurat <- FindVariableFeatures(seurat, selection.method = 'vst', nfeatures = 2000) # 筛选高变基因
+VariableFeaturePlot(seurat, cols = c('grey','red'))
+seurat <- ScaleData(seurat) # 数据归一化，这步骤有一步回归的分析，去除噪声
+seurat <- RunPCA(seurat, features = VariableFeatures(seurat)) # PCA线性降维分析
+ElbowPlot(seurat, ndims = 30) # 流石图协助选择PC维度 10
+seurat <- RunHarmony(seurat, 'orig.ident') # Harmony去批次
+seurat <- RunUMAP(seurat, dims = 1:10, reduction = 'harmony')
+seurat <- RunTSNE(seurat, dims = 1:10, reduction = 'harmony')
+seurat <- FindNeighbors(seurat, reduction = 'harmony', dims = 1:10)
+seurat <- FindClusters(seurat, resolution = c(seq(0, 1.9, .2)))
+
+map2(paste0('RNA_snn_res.', seq(0, 1.9, .2)), paste0('SNN-', seq(0, 1.9, .2)), ~
+       DimPlot(seurat, reduction = 'tsne', group.by = .x, label = T) +
+       ggtitle(.y) + 
+       theme(aspect.ratio = 1) + 
+       guides(color = 'none')) %>% 
+  plot_grid(plotlist = ., nrow = 2)
+ggsave('tsne.SNN.dimplot.jpg', width = 20, height = 8, bg = '#ffffff')
+
+map2(paste0('RNA_snn_res.', seq(0, 1.9, .2)), paste0('SNN: ', seq(0, 1.9, .2)), ~
+       DimPlot(seurat, reduction = 'umap', group.by = .x, label = T) +
+       ggtitle(.y) + 
+       theme(aspect.ratio = 1) + 
+       guides(color = 'none')) %>% 
+  plot_grid(plotlist = ., nrow = 2)
+ggsave('umap.SNN.dimplot.jpg', width = 20, height = 8, bg = '#ffffff')
+
+#### marker identify ####  
+# 细胞基因标记
+markers <- list(
+  Stem_cell = c('Lgr5','Hopx','Bmi1','Ascl2','Olfm4','Smoc2'),
+  TA_cell = c('Mki67', 'Pcna', 'Top2a', 'Ccna2', 'Mcm5'),
+  Paneth_cell = c('Ang4','Lyz1','Agr2','Mptx1'),
+  Goblet_cell = c('Muc2','Ccl9','Clca1','Tff3','Agr2','Fcgbp','Zg16'),
+  Enteroendocrine_cell = c('Chga','Neurog3','Chgb','Tac1','Tph1'),
+  Tuft_cell = c('Dclk1','Trpm5','Avil','Lrmp'),
+  Enterocyte = c('Aldob','Apoa1','Apoa4','Gsta1','Fabp1','Prap1'),
+  Epithelial_cell = c('EpCAM','Vil1','Krt20','Cldn7','Cdh1'),
+  Lymphocyte = c('Cd3e','Cd3g'),
+  T_cell = c('Cd3g','Cd4','Cd8a','Tcrg-C1','Tcrg-C2','Tcrg-C4','Gzma','Gzmb'),
+  B_cell = c('Cd79a','Jchain','Igha','Igkc') )
+
+# featureplots-tsne
+markers <- map(markers, ~ .x[.x %in% rownames(seurat)])
+max_len <- map_vec(markers, ~ length(.x)) %>% max()
+map2(markers, names(markers), \(x, y) {
+  p_text <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold',
+                        label = stringr::str_to_title(gsub('_', ' ', y))) + 
+                   theme_void())
+  p_feats <- map(x, ~ FeaturePlot(seurat, reduction = 'tsne', features = .x) + 
+                   theme(aspect.ratio = 1))
+  p_void <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold') + 
+                   theme_void())
+  cowplot::plot_grid(plotlist = c(p_text, p_feats, rep(p_void, times = max_len - length(x))), 
+                     nrow = 1)  } ) %>%
+  cowplot::plot_grid(plotlist = ., align = 'v', ncol = 1)
+ggsave('tsne.featureplot.jpg', width = 4 * max_len + 4, height = 4 * length(markers), 
+       limitsize = F, bg = '#ffffff')
+
+# featureplots-umap
+map2(markers, names(markers), \(x, y) {
+  p_text <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold',
+                        label = stringr::str_to_title(gsub('_', ' ', y))) + 
+                   theme_void())
+  p_feats <- map(x, ~ FeaturePlot(seurat, reduction = 'umap', features = .x) + 
+                   theme(aspect.ratio = 1))
+  p_void <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold') + 
+                   theme_void())
+  cowplot::plot_grid(plotlist = c(p_text, p_feats, rep(p_void, times = max_len - length(x))), 
+                     nrow = 1)  } ) %>%
+  cowplot::plot_grid(plotlist = ., align = 'v', ncol = 1)
+ggsave('umap.featureplot.jpg', width = 4 * max_len + 4, height = 4 * length(markers), 
+       limitsize = F, bg = '#ffffff')
+
+seurat <- SetIdent(seurat, value = 'RNA_snn_res.0.6')
+
+# featureplot-tsne
+DimPlot(seurat, reduction = 'tsne', label = T, alpha = 1, raster = F) + 
+  NoLegend() + theme(aspect.ratio = 1)
+ggsave('tsne.SNN.0.6.dimplot.pdf', width = 6, height = 6, bg = '#ffffff')
+
+# featureplot-umap
+DimPlot(seurat, reduction = 'umap', label = T, alpha = 1, raster = F) + 
+  NoLegend() + theme(aspect.ratio = 1)
+ggsave('umap.SNN.0.6.dimplot.pdf', width = 6, height = 6, bg = '#ffffff')
+
+# 鉴定每个cluster中的marker
+allmarkers <- FindAllMarkers(seurat, only.pos = T, min.pct = 0.25, logfc.threshold = 0.25)
+saveRDS(allmarkers, 'allmarkers.cluster.rds')
+write.xlsx(allmarkers, 'allmarkers.cluster.xlsx')
+
+# 其他基因标记
+markers <- list(
+  Wnt = rownames(seurat)[grepl('Wnt', rownames(seurat))],
+  Bmp = rownames(seurat)[grepl('Bmp', rownames(seurat))],
+  Egf = rownames(seurat)[grepl('Egf', rownames(seurat))],
+  Efnb = rownames(seurat)[grepl('Efnb', rownames(seurat))] )
+
+# featureplots-tsne
+markers <- map(markers, ~ .x[.x %in% rownames(seurat)])
+max_len <- map_vec(markers, ~ length(.x)) %>% max()
+map2(markers, names(markers), \(x, y) {
+  p_text <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold',
+                        label = stringr::str_to_title(gsub('_', ' ', y))) + 
+                   theme_void())
+  p_feats <- map(x, ~ FeaturePlot(seurat, reduction = 'tsne', features = .x) + 
+                   theme(aspect.ratio = 1))
+  p_void <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold') + 
+                   theme_void())
+  cowplot::plot_grid(plotlist = c(p_text, p_feats, rep(p_void, times = max_len - length(x))), 
+                     nrow = 1)  } ) %>%
+  cowplot::plot_grid(plotlist = ., align = 'v', ncol = 1)
+ggsave('tsne.featureplot.others.jpg', width = 4 * max_len + 4, height = 4 * length(markers), 
+       limitsize = F, bg = '#ffffff')
+
+# featureplots-umap
+map2(markers, names(markers), \(x, y) {
+  p_text <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold',
+                        label = stringr::str_to_title(gsub('_', ' ', y))) + 
+                   theme_void())
+  p_feats <- map(x, ~ FeaturePlot(seurat, reduction = 'umap', features = .x) + 
+                   theme(aspect.ratio = 1))
+  p_void <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold') + 
+                   theme_void())
+  cowplot::plot_grid(plotlist = c(p_text, p_feats, rep(p_void, times = max_len - length(x))), 
+                     nrow = 1)  } ) %>%
+  cowplot::plot_grid(plotlist = ., align = 'v', ncol = 1)
+ggsave('umap.featureplot.others.jpg', width = 4 * max_len + 4, height = 4 * length(markers), 
+       limitsize = F, bg = '#ffffff')
+
+#### marker annotate ####
+# marker 自动注释
+markers <- list(
+  Stem_cell = c('Lgr5','Hopx','Bmi1','Ascl2','Olfm4','Smoc2'),
+  TA_cell = c('Mki67', 'Pcna', 'Top2a', 'Ccna2', 'Mcm5'),
+  Paneth_cell = c('Ang4','Lyz1','Agr2','Mptx1'),
+  Goblet_cell = c('Muc2','Ccl9','Clca1','Tff3','Agr2','Fcgbp','Zg16'),
+  Enteroendocrine_cell = c('Chga','Neurog3','Chgb','Tac1','Tph1'),
+  Tuft_cell = c('Dclk1','Trpm5','Avil','Lrmp'),
+  Enterocyte = c('Aldob','Apoa1','Apoa4','Gsta1','Fabp1','Prap1'),
+  Epithelial_cell = c('EpCAM','Vil1','Krt20','Cldn7','Cdh1'),
+  Lymphocyte = c('Cd3e','Cd3g'),
+  T_cell = c('Cd3g','Cd4','Cd8a','Tcrg-C1','Tcrg-C2','Tcrg-C4','Gzma','Gzmb'),
+  B_cell = c('Cd79a','Jchain','Igha','Igkc') )
+
+map(markers, ~ filter(allmarkers, gene %in% .x) ) %>% 
+  keep(~ nrow(.x) != 0) %>% 
+  map(~ group_by(.x, cluster) %>% 
+        group_modify(~ data.frame(match_n = nrow(.x), genes = paste(.x$gene, collapse = ',')))) %>% 
+  map2_df(names(.), ~ add_column(.x, gene = .y, .before = 1)) %>% 
+  data.frame() %>% 
+  arrange(cluster)
+
+seurat <- RenameIdents(seurat, 
+                       '0' = 'Enterocyte', '1' = 'Enterocyte', '2' = 'Enterocyte', 
+                       '3' = 'Enterocyte', '4' = 'Enterocyte', '5' = 'Lymphocyte',
+                       '6' = 'Goblet_cell', '7' = 'Enterocyte', '8' = 'Stem_cell', 
+                       '9' = 'Enterocyte', '10' = 'Paneth_cell', '11' = 'Enterocyte',
+                       '12' = 'TA_cell', '13' = 'Enterocyte', '14' = 'TA_cell', 
+                       '15' = 'Enteroendocrine_cell', '16' = 'Tuft_cell', '17' = 'TA_cell')
+
+# 疑难细胞群注释
+allmarkers %>% 
+  filter(p_val_adj < 0.001 & cluster == '17') %>% 
+  pull() %>% 
+  scRNA_marker_match(tissue = 'intestine', org = 'mouse') %>% 
+  select(-species, -tissue, -cell, -gene) %>% 
+  filter(grepl('intestine', item)) %>% 
+  data.frame() %>% 
+  head(10)
+
+# 可视化-tsne 
+DimPlot(seurat, reduction = 'tsne', label = T, alpha = 1, cols = 'Set3', raster = F) + 
+  theme(aspect.ratio = 1) + NoLegend()
+ggsave('tsne.marker.dimplot.pdf', width = 6, height = 6, bg = '#ffffff')
+
+DimPlot(seurat, reduction = 'umap', label = T, alpha = 1, cols = 'Set3', raster = F) + 
+  theme(aspect.ratio = 1) + NoLegend()
+ggsave('umap.marker.dimplot.pdf', width = 6, height = 6, bg = '#ffffff')
+
+group <- read.delim('data/GSE123516_group.txt') %>% 
+  dplyr::select(sample, group = sample_title) %>% 
+  mutate(group = str_split_i(group, '-', 2))
+seurat$group <- group$group[match(seurat$orig.ident, group$sample)]
+
+DimPlot(seurat, reduction = 'tsne', label = T, alpha = 1, split.by = 'group', raster = F,
+        cols = 'Set3', label.size = 3) + theme(aspect.ratio = 1)
+ggsave('tsne.marker.dimplot.facet_by_group.pdf', width = 11, height = 5, bg = '#ffffff')
+
+DimPlot(seurat, reduction = 'umap', label = T, alpha = 1, split.by = 'group', raster = F,
+        cols = 'Set3', label.size = 3) + theme(aspect.ratio = 1)
+ggsave('umap.marker.dimplot.facet_by_group.pdf', width = 11, height = 5, bg = '#ffffff')
+
+# 差异基因
+allmarkers <- FindAllMarkers(seurat, only.pos = T, min.pct = 0.25, logfc.threshold = 0.25)
+saveRDS(allmarkers, 'allmarkers.cell.rds')
+write.xlsx(allmarkers, 'allmarkers.cell.xlsx')
+
+# 保存seurat对象
+saveRDS(seurat, 'seurat.out.rds')
+seurat <- readRDS('seurat.out.rds')
+
+#### different genes ####
+cell_level <- levels(Idents(seurat))
+
+diffs <- map(cell_level, \(x) 
+             FindMarkers(subset(seurat, idents = x), ident.1 = 'Irradiated', 
+                         ident.2 = 'Normal', group.by = 'group') %>% 
+               rownames_to_column('name') ) %>% 
+  set_names(cell_level)
+saveRDS(diffs, 'diffs.rds')
+write.xlsx(diffs, 'diffs.xlsx')
+
+#### GSEA KEGG ####
+options(clusterProfiler.download.method = 'wget', timeout = 120)
+pacman::p_load(org.Mm.eg.db, clusterProfiler, BiocParallel)
+register(SerialParam())
+
+gene_info <- AnnotationDbi::select(org.Mm.eg.db, keys(org.Mm.eg.db), 
+                                   keytype = 'ENTREZID', columns = c('SYMBOL'))
+
+diffs <- readRDS('diffs.rds')
+
+gseKEGG <- map(diffs, ~ mutate(.x, ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+                 filter(!is.na(ENTREZID)) %>% 
+                 pull(avg_log2FC, name = ENTREZID) %>% 
+                 sort(decreasing = T) %>% 
+                 gseKEGG(organism = 'mmu', pvalueCutoff = 1) %>% 
+                 data.frame() )
+write.xlsx(gseKEGG, 'diffs.gseKEGG.xlsx')
+
+#### ORA KEGG ####
+# all genes
+eKEGG <- map(diffs, ~ filter(.x, p_val_adj < .05 & abs(avg_log2FC) > .25) %>% 
+               mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+               pull(ENTREZID) %>% 
+               na.omit %>% 
+               enrichKEGG(organism = 'mmu', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+               data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eKEGG, 'diffs.eKEGG.all_genes.xlsx')
+
+# up genes
+eKEGG <- map(diffs, ~ filter(.x, p_val_adj < .05 & avg_log2FC > .25) %>%
+               mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+               pull(ENTREZID) %>% 
+               na.omit %>% 
+               enrichKEGG(organism = 'mmu', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+               data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eKEGG, 'diffs.eKEGG.up_genes.xlsx')
+
+# down genes
+eKEGG <- map(diffs, ~ filter(.x, p_val_adj < .05 & avg_log2FC < -.25) %>% 
+               mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+               pull(ENTREZID) %>% 
+               na.omit %>% 
+               enrichKEGG(organism = 'mmu', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+               data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eKEGG, 'diffs.eKEGG.down_genes.xlsx')
+
+#### ORA GO ####
+# all genes
+eGO <- map(diffs, ~ filter(.x, p_val_adj < .05 & abs(avg_log2FC) > .25) %>% 
+             pull(name) %>% 
+             enrichGO(OrgDb = 'org.Mm.eg.db', keyType = 'SYMBOL',
+                      pvalueCutoff = .2, qvalueCutoff = .2, ont = 'ALL') %>% 
+             data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eGO, 'diffs.eGO.all_genes.xlsx')
+
+# up genes
+eGO <- map(diffs, ~ filter(.x, p_val_adj < .05 & avg_log2FC > .25) %>% 
+             pull(name) %>% 
+             na.omit() %>% 
+             enrichGO(OrgDb = 'org.Mm.eg.db', keyType = 'SYMBOL',
+                      pvalueCutoff = .2, qvalueCutoff = .2, ont = 'ALL') %>% 
+             data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eGO, 'diffs.eGO.up_genes.xlsx')
+
+# down genes
+eGO <- map(diffs, ~ filter(.x, p_val_adj < .05 & avg_log2FC < -.25) %>% 
+             pull(name) %>%  
+             na.omit() %>% 
+             enrichGO(OrgDb = 'org.Mm.eg.db', keyType = 'SYMBOL',
+                      pvalueCutoff = .2, qvalueCutoff = .2, ont = 'ALL') %>% 
+             data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eGO, 'diffs.eGO.down_genes.xlsx')
+
+#### PPARα/PPARγ/HNF4α/HNF4γ ####
+seurat <- readRDS('seurat.out.rds')
+
+# PPARα
+data <- FetchData(seurat, vars = c('Ppara')) %>% 
+  add_column(cells = seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(Ppara > 0, 'Ppara+', 'Ppara-'))
+
+left_join(x = filter(data, label == 'Ppara+') %>% count(cells),
+          y = count(data, cells), by = 'cells') %>% 
+  rename(x = 2, y = 3) %>% 
+  mutate(perc = x / y * 100) %>% 
+  ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '', 
+            ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+            rotate = T, title = 'Ppara+ cell percentage in each cell type') +
+  scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+        aspect.ratio = 2)
+ggsave('Ppara.percent.barplot.pdf', width = 5, height = 6.5)
+
+# PPARγ
+data <- FetchData(seurat, vars = c('Pparg')) %>% 
+  add_column(cells = seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(Pparg > 0, 'Pparg+', 'Pparg-'))
+
+left_join(x = filter(data, label == 'Pparg+') %>% count(cells),
+          y = count(data, cells), by = 'cells') %>% 
+  rename(x = 2, y = 3) %>% 
+  mutate(perc = x / y * 100) %>% 
+  ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '',
+            ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+            rotate = T, title = 'Pparg+ cell percentage in each cell type') +
+  scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+        aspect.ratio = 2)
+ggsave('Pparg.percent.barplot.pdf', width = 5, height = 6.5)
+
+# HNF4α
+data <- FetchData(seurat, vars = c('Hnf4a')) %>% 
+  add_column(cells = seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(Hnf4a > 0, 'Hnf4a+', 'Hnf4a-'))
+
+left_join(x = filter(data, label == 'Hnf4a+') %>% count(cells),
+          y = count(data, cells), by = 'cells') %>% 
+  rename(x = 2, y = 3) %>% 
+  mutate(perc = x / y * 100) %>% 
+  ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '', 
+            ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+            rotate = T, title = 'Hnf4a+ cell percentage in each cell type') +
+  scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+        aspect.ratio = 2)
+ggsave('Hnf4a.percent.barplot.pdf', width = 5, height = 6.5)
+
+# HNF4γ
+data <- FetchData(seurat, vars = c('Hnf4g')) %>% 
+  add_column(cells = seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(Hnf4g > 0, 'Hnf4g+', 'Hnf4g-'))
+
+left_join(x = filter(data, label == 'Hnf4g+') %>% count(cells),
+          y = count(data, cells), by = 'cells') %>% 
+  rename(x = 2, y = 3) %>% 
+  mutate(perc = x / y * 100) %>% 
+  ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '',
+            ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+            rotate = T, title = 'Hnf4g+ cell percentage in each cell type') +
+  scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+        aspect.ratio = 2)
+ggsave('Hnf4g.percent.barplot.pdf', width = 5, height = 6.5)
+```
+
+## ElmentaiteR_2020.Homo 
+
+```{R}
+#### read ####
+SeuratDisk::Convert('data/epi_raw_counts02_v2.h5ad', dest = 'epi_raw_counts02_v2.h5seurat',
+                    assay = 'RNA', overwrite = F)
+seurat <- SeuratDisk::LoadH5Seurat('epi_raw_counts02_v2.h5seurat')
+seurat <- UpdateSeuratObject(seurat)
+
+saveRDS(seurat, 'seurat.raw.rds')
+
+dim(seurat)
+# [1]  33538 142113
+
+#### PCA and cluster ####
+seurat <- readRDS('seurat.raw.rds')
+seurat <- subset(seurat, category == 'Epithelial')
+
+seurat <- NormalizeData(seurat, normalization.method = 'LogNormalize', scale.factor = 1e4, verbose = T) # 标准化
+seurat <- FindVariableFeatures(seurat, selection.method = 'vst', nfeatures = 2000) # 筛选高变基因
+seurat <- ScaleData(seurat) # 数据归一化，这步骤有一步回归的分析，去除噪声
+seurat <- RunPCA(seurat, features = VariableFeatures(seurat)) # PCA线性降维分析
+ElbowPlot(seurat, ndims = 30) # 流石图协助选择PC维度 10
+# seurat <- RunHarmony(seurat, 'orig.ident') # Harmony去批次
+seurat <- RunUMAP(seurat, dims = 1:13, reduction = 'pca')
+seurat <- RunTSNE(seurat, dims = 1:13, reduction = 'pca')
+
+Idents(seurat) <- 'annotation'
+allmarkers <- FindAllMarkers(seurat, only.pos = T, min.pct = 0.25, logfc.threshold = 0.25)
+saveRDS(allmarkers, 'allmarkers.cell.rds')
+write.xlsx(allmarkers, 'allmarkers.cell.xlsx')
+
+saveRDS(seurat, 'seurat.out.rds')
+
+#### featureplot ####
+# all cells
+data <- data.frame(seurat@reductions$tsne@cell.embeddings) %>% 
+  rownames_to_column('name') %>% 
+  add_column(cell = seurat$annotation)
+
+ggscatter(data, 'tSNE_1', 'tSNE_2', color = 'cell', xlab = 'tsne_1', ylab = 'tsne_2', 
+          size = .2, legend = 'right') +
+  scale_x_continuous(expand = c(.02, .02)) +
+  scale_y_continuous(expand = c(.02, .02)) +
+  theme(axis.ticks = element_line(linewidth = .5, color = 'black'),
+        axis.ticks.length = unit(2, 'mm'),
+        axis.title = element_text(size = 12, color = 'black'),
+        axis.text = element_text(size = 12, color = 'black'),
+        axis.line = element_line(linewidth = .5, color = 'black'),
+        panel.grid = element_blank(), 
+        aspect.ratio = 1)
+ggsave('tsne.marker.dimplot.pdf', width = 9, height = 6, bg = '#ffffff')
+
+# other cells
+data <- data.frame(seurat@reductions$tsne@cell.embeddings) %>% 
+  rownames_to_column('name') %>% 
+  data.frame(seurat@meta.data, check.names = F, row.names = NULL) %>% 
+  filter(annotation %in% c('Stem cells','TA','Enterocyte','Colonocyte','BEST4+ epithelial','BEST2+ Goblet cell',
+                           'Goblet cell','Paneth','Tuft','Distal progenitor','Proximal progenitor'))
+
+plot_text <- dplyr::select(data, tSNE_1, tSNE_2, annotation) %>% 
+  group_by(annotation) %>% 
+  summarise(tsne_1 = median(tSNE_1), tsne_2 = median(tSNE_2))
+
+ggscatter(data, 'tSNE_1', 'tSNE_2', color = 'annotation', xlab = 'tsne_1', ylab = 'tsne_2', 
+          size = .2, legend = 'none', palette = 'Set3') +
+  ggrepel::geom_label_repel(aes(tsne_1, tsne_2, label = annotation, fill = annotation), 
+                            plot_text, inherit.aes = F) +
+  scale_x_continuous(expand = c(.02, .02)) +
+  scale_y_continuous(expand = c(.02, .02)) +
+  theme(axis.ticks = element_line(linewidth = .5, color = 'black'),
+        axis.ticks.length = unit(2, 'mm'),
+        axis.title = element_text(size = 12, color = 'black'),
+        axis.text = element_text(size = 12, color = 'black'),
+        axis.line = element_line(linewidth = .5, color = 'black'),
+        panel.grid = element_blank(), 
+        aspect.ratio = 1)
+ggsave('tsne.marker.dimplot.tidy.pdf', width = 6, height = 6, bg = '#ffffff')
+
+#### different genes ####
+seurat <- readRDS('seurat.out.rds')
+
+sub_seurat <- subset(seurat, Diagnosis %in% c('Pediatric healthy','Pediatric Crohn Disease') &
+                     annotation %in% c('Stem cells','TA','Enterocyte','Goblet cell','Paneth','Tuft'))
+
+cell_level <- levels(Idents(sub_seurat))
+
+diffs <- map(cell_level, ~ FindMarkers(subset(sub_seurat, annotation == .x), 
+                                       ident.1 = 'Pediatric Crohn Disease', 
+                                       ident.2 = 'Pediatric healthy', group.by = 'Diagnosis') %>% 
+               rownames_to_column('name') ) %>% 
+  set_names(cell_level)
+saveRDS(diffs, 'diffs.CD_vs_HC.rds')
+write.xlsx(diffs, 'diffs.CD_vs_HC.xlsx')
+
+#### GSEA KEGG ####
+options(clusterProfiler.download.method = 'curl', timeout = 150)
+pacman::p_load(org.Hs.eg.db, KEGGREST, clusterProfiler, BiocParallel)
+register(SerialParam())
+
+gene_info <- AnnotationDbi::select(org.Hs.eg.db, keys(org.Hs.eg.db),
+                                   keytype = 'ENTREZID', columns = c('SYMBOL'))
+
+download_KEGG('hsa')
+
+gseKEGG <- map(diffs, ~ mutate(.x, ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+                 filter(!is.na(ENTREZID)) %>% 
+                 pull(avg_log2FC, name = ENTREZID) %>% 
+                 sort(decreasing = T) %>% 
+                 gseKEGG(organism = 'hsa', pvalueCutoff = 1) %>% 
+                 data.frame() )
+write.xlsx(gseKEGG, 'diffs.gseKEGG.CD_vs_HC.xlsx')
+
+#### ORA KEGG ####
+# all genes
+eKEGG <- map(diffs, ~ filter(.x, p_val_adj < .05 & abs(avg_log2FC) > .25) %>%
+               mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+               pull(ENTREZID) %>% 
+               na.omit %>% 
+               enrichKEGG(organism = 'hsa', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+               data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eKEGG, 'diffs.eKEGG.all_gene.CD_vs_HC.xlsx')
+
+# up genes
+eKEGG <- map(diffs, ~ filter(.x, p_val_adj < .05 & avg_log2FC > .25) %>% 
+               mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+               pull(ENTREZID) %>% 
+               na.omit %>% 
+               enrichKEGG(organism = 'hsa', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+               data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eKEGG, 'diffs.eKEGG.up_gene.CD_vs_HC.xlsx')
+
+# down genes
+eKEGG <- map(diffs, ~ filter(.x, p_val_adj < .05 & avg_log2FC < -.25) %>% 
+               mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+               pull(ENTREZID) %>% 
+               na.omit %>% 
+               enrichKEGG(organism = 'hsa', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+               data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eKEGG, 'diffs.eKEGG.down_gene.CD_vs_HC.xlsx')
+
+#### ORA GO ####
+# all genes
+eGO <- map(diffs, ~ filter(.x, p_val_adj < .05 & abs(avg_log2FC) > .25) %>% 
+             pull(name) %>% 
+             enrichGO(OrgDb = 'org.Hs.eg.db', keyType = 'SYMBOL',
+                      pvalueCutoff = .2, qvalueCutoff = .2, ont = 'ALL') %>% 
+             data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eGO, 'diffs.eGO.all_gene.CD_vs_HC.xlsx')
+
+# up genes
+eGO <- map(diffs, ~ filter(.x, p_val_adj < .05 & avg_log2FC > .25) %>% 
+             pull(name) %>% 
+             na.omit %>% 
+             enrichGO(OrgDb = 'org.Hs.eg.db', keyType = 'SYMBOL',
+                      pvalueCutoff = .2, qvalueCutoff = .2, ont = 'ALL') %>% 
+             data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eGO, 'diffs.eGO.up_gene.CD_vs_HC.xlsx')
+
+# down genes
+eGO <- map(diffs, ~ filter(.x, p_val_adj < .05 & avg_log2FC < -.25) %>% 
+             pull(name) %>%  
+             na.omit %>% 
+             enrichGO(OrgDb = 'org.Hs.eg.db', keyType = 'SYMBOL',
+                      pvalueCutoff = .2, qvalueCutoff = .2, ont = 'ALL') %>% 
+             data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eGO, 'diffs.eGO.down_gene.CD_vs_HC.xlsx')
+
+#### PPARα/PPARγ/HNF4α/HNF4γ in_gene_type ####
+# PPARα
+data <- FetchData(seurat, vars = c('PPARA')) %>% 
+  add_column(cells = seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(PPARA > 0, 'PPARA+', 'PPARA-'))
+
+left_join(x = filter(data, label == 'PPARA+') %>% count(cells),
+          y = count(data, cells), by = 'cells') %>% 
+  rename(x = 2, y = 3) %>% 
+  mutate(perc = x / y * 100) %>% 
+  ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '', 
+            ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+            rotate = T, title = 'PPARA+ cell percentage in each cell type') +
+  scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+        aspect.ratio = 2)
+ggsave('PPARA.percent.barplot.pdf', width = 5, height = 6.5)
+
+# PPARγ
+data <- FetchData(seurat, vars = c('PPARG')) %>% 
+  add_column(cells = seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(PPARG > 0, 'PPARG+', 'PPARG-'))
+
+left_join(x = filter(data, label == 'PPARG+') %>% count(cells),
+          y = count(data, cells), by = 'cells') %>% 
+  rename(x = 2, y = 3) %>% 
+  mutate(perc = x / y * 100) %>% 
+  ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '',
+            ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+            rotate = T, title = 'PPARG+ cell percentage in each cell type') +
+  scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+        aspect.ratio = 2)
+ggsave('PPARG.percent.barplot.pdf', width = 5, height = 6.5)
+
+# HNF4α
+data <- FetchData(seurat, vars = c('HNF4A')) %>% 
+  add_column(cells = seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(HNF4A > 0, 'HNF4A+', 'HNF4A-'))
+
+left_join(x = filter(data, label == 'HNF4A+') %>% count(cells),
+          y = count(data, cells), by = 'cells') %>% 
+  rename(x = 2, y = 3) %>% 
+  mutate(perc = x / y * 100) %>% 
+  ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '',
+            ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+            rotate = T, title = 'HNF4A+ cell percentage in each cell type') +
+  scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+        aspect.ratio = 2)
+ggsave('HNF4A.percent.barplot.pdf', width = 5, height = 6.5)
+
+# HNF4γ
+data <- FetchData(seurat, vars = c('HNF4G')) %>% 
+  add_column(cells = seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(HNF4G > 0, 'HNF4G+', 'HNF4G-'))
+
+left_join(x = filter(data, label == 'HNF4G+') %>% count(cells),
+          y = count(data, cells), by = 'cells') %>% 
+  rename(x = 2, y = 3) %>% 
+  mutate(perc = x / y * 100) %>% 
+  ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '',
+            ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+            rotate = T, title = 'HNF4G+ cell percentage in each cell type') +
+  scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+        aspect.ratio = 2)
+ggsave('HNF4G.percent.barplot.pdf', width = 5, height = 6.5)
+
+#### PPARα/PPARγ/HNF4α/HNF4γ in_gene_type by_diagnosis ####
+diagnosis <- as.character(unique(seurat$Diagnosis))
+
+# PPARα
+plots <- map(diagnosis, ~ {
+  sub_seurat <- subset(seurat, Diagnosis == .x)
+  
+  data <- FetchData(sub_seurat, vars = c('PPARA')) %>% 
+    add_column(cells = sub_seurat@active.ident) %>% 
+    rownames_to_column('name') %>% 
+    mutate(label = ifelse(PPARA > 0, 'PPARA+', 'PPARA-'))
+  
+  left_join(x = filter(data, label == 'PPARA+') %>% count(cells),
+            y = count(data, cells), by = 'cells') %>% 
+    rename(x = 2, y = 3) %>% 
+    mutate(perc = x / y * 100) %>% 
+    ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '',
+              ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+              rotate = T, title = 'PPARA+ cell percentage in each cell type') +
+    labs(caption = .x) +
+    scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+    theme(axis.ticks.length = unit(2, 'mm'),
+          plot.title = element_text(face = 'bold', hjust = .5),
+          panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+          aspect.ratio = 2) }) %>% 
+  plot_grid(plotlist = ., align = 'v', nrow = 1)
+plots
+ggsave('PPARA.percent.by_diagnosis.barplot.pdf', width = 18, height = 6)
+
+# PPARγ
+plots <- map(diagnosis, ~ {
+  sub_seurat <- subset(seurat, Diagnosis == .x)
+  
+  data <- FetchData(sub_seurat, vars = c('PPARG')) %>% 
+    add_column(cells = sub_seurat@active.ident) %>% 
+    rownames_to_column('name') %>% 
+    mutate(label = ifelse(PPARG > 0, 'PPARG+', 'PPARG-'))
+  
+  left_join(x = filter(data, label == 'PPARG+') %>% count(cells),
+            y = count(data, cells), by = 'cells') %>% 
+    rename(x = 2, y = 3) %>% 
+    mutate(perc = x / y * 100) %>% 
+    ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '',
+              ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+              rotate = T, title = 'PPARG+ cell percentage in each cell type') +
+    labs(caption = .x) +
+    scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+    theme(axis.ticks.length = unit(2, 'mm'),
+          plot.title = element_text(face = 'bold', hjust = .5),
+          panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+          aspect.ratio = 2)  }) %>% 
+  plot_grid(plotlist = ., align = 'v', nrow = 1)
+plots
+ggsave('PPARG.percent.by_diagnosis.barplot.pdf', width = 18, height = 6)
+
+# HNF4α
+plots <- map(diagnosis, ~ {
+  sub_seurat <- subset(seurat, Diagnosis == .x)
+  
+  data <- FetchData(sub_seurat, vars = c('HNF4A')) %>% 
+    add_column(cells = sub_seurat@active.ident) %>% 
+    rownames_to_column('name') %>% 
+    mutate(label = ifelse(HNF4A > 0, 'HNF4A+', 'HNF4A-'))
+  
+  left_join(x = filter(data, label == 'HNF4A+') %>% count(cells),
+            y = count(data, cells), by = 'cells') %>% 
+    rename(x = 2, y = 3) %>% 
+    mutate(perc = x / y * 100) %>% 
+    ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '',
+              ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+              rotate = T, title = 'HNF4A+ cell percentage in each cell type') +
+    labs(caption = .x) +
+    scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+    theme(axis.ticks.length = unit(2, 'mm'),
+          plot.title = element_text(face = 'bold', hjust = .5),
+          panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+          aspect.ratio = 2) }) %>% 
+  plot_grid(plotlist = ., align = 'v', nrow = 1)
+plots
+ggsave('HNF4A.percent.by_diagnosis.barplot.pdf', width = 18, height = 6)
+
+# HNF4γ
+plots <- map(diagnosis, ~ {
+  sub_seurat <- subset(seurat, Diagnosis == .x)
+  
+  data <- FetchData(sub_seurat, vars = c('HNF4G')) %>% 
+    add_column(cells = sub_seurat@active.ident) %>% 
+    rownames_to_column('name') %>% 
+    mutate(label = ifelse(HNF4G > 0, 'HNF4G+', 'HNF4G-'))
+  
+  left_join(x = filter(data, label == 'HNF4G+') %>% count(cells),
+            y = count(data, cells), by = 'cells') %>% 
+    rename(x = 2, y = 3) %>% 
+    mutate(perc = x / y * 100) %>% 
+    ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '',
+              ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+              rotate = T, title = 'HNF4G+ cell percentage in each cell type') +
+    labs(caption = .x) +
+    scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+    theme(axis.ticks.length = unit(2, 'mm'),
+          plot.title = element_text(face = 'bold', hjust = .5),
+          panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+          aspect.ratio = 2)  }) %>% 
+  plot_grid(plotlist = ., align = 'v', nrow = 1)
+plots
+ggsave('HNF4G.percent.by_diagnosis.barplot.pdf', width = 18, height = 6)
+
+#### embryonic/fetal (n = 9 donors) different region / PCW ####
+seurat <- readRDS('seurat.out.rds')
+
+names <- c('Stem cells','TA','Enterocyte','Colonocyte','BEST4+ epithelial','Goblet cell',
+           'Paneth','Tuft','Proximal progenitor','Distal progenitor','EC cells (TAC1+)')
+
+sub_seurat <- subset(seurat, Diagnosis == 'fetal' & annotation %in% names & Region != 'lymph node')
+sub_seurat$Age2 <- as.numeric(sub('Wk', '', sub_seurat$Age))
+
+# cell percent
+data <- count(sub_seurat@meta.data, Age2, annotation, Region) %>% 
+  group_by(Region, Age2) %>% 
+  mutate(perc = n / sum(n) * 100)
+
+map(unique(data$Age2), ~ 
+      filter(data, Age2 == .x) %>% 
+      ggbarplot('Region', 'perc', fill = 'annotation', xlab = 'region', ylab = 'Percent (%)',
+                title = paste0(.x, ' weeks post-conception'), legend = 'right') +
+      scale_fill_brewer(palette = 'Set3') +
+      theme(aspect.ratio = 2,
+            plot.title = element_text(face = 'bold', hjust = .5),
+            axis.ticks.length = unit(2, 'mm')) ) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', nrow = 3)
+ggsave('cell_perc.fetal.by_PCW.pdf', width = 20, height = 10)
+
+map(unique(data$Region), ~ 
+      filter(data, Region == .x) %>% 
+      ggbarplot('Age2', 'perc', fill = 'annotation', xlab = 'Weeks post-conception', 
+                ylab = 'Percent (%)', title = .x, legend = 'right') +
+      scale_fill_brewer(palette = 'Set3') +
+      theme(aspect.ratio = 1/2,
+            plot.title = element_text(face = 'bold', hjust = .5),
+            axis.ticks.length = unit(2, 'mm')) ) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', nrow = 2)
+ggsave('cell_perc.fetal.by_Region.pdf', width = 8, height = 7)
+
+# PPARA
+data <- FetchData(sub_seurat, vars = c('PPARA')) %>% 
+  add_column(cell = sub_seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(PPARA > 0, 'PPARA+', 'PPARA-')) %>% 
+  data.frame(sub_seurat@meta.data, check.names = F, row.names = NULL) %>% 
+  mutate(Age2 = as.numeric(sub('Wk', '', Age))) %>% 
+  group_by(Region, Age2) %>% 
+  group_modify(~ left_join(filter(.x, label == 'PPARA+') %>% count(cell),
+                           count(.x, cell), by = 'cell') %>% 
+                 rename(x = 2, y = 3)) %>% 
+  mutate(perc = x / y * 100)
+
+map(unique(data$Region), ~
+      filter(data, Region == .x) %>% 
+      ggplot(aes(Age2, perc)) +
+      geom_line(aes(color = cell), linetype = 'solid', linewidth = .6) +
+      geom_point(aes(fill = cell), shape = 21, color = 'white', size = 3, stroke = 1) + 
+      labs(x = 'Weeks post-conception', y = 'PPARA+ cell percentage in each cell type (%)', 
+           title = .x) +
+      scale_color_brewer(palette = 'Set3') +
+      scale_fill_brewer(palette = 'Set3') +
+      scale_x_continuous(n.breaks = 10) +
+      theme_pubr() +
+      theme(aspect.ratio = 1/2,
+            plot.title = element_text(face = 'bold', hjust = .5),
+            axis.ticks.length = unit(2, 'mm')) +
+      guides(color = guide_legend(position = 'right')) ) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', nrow = 2)
+ggsave('PPARA.percent.fetal.by_Region.lineplot.pdf', width = 8, height = 7)
+
+# PPARG
+data <- FetchData(sub_seurat, vars = c('PPARG')) %>% 
+  add_column(cell = sub_seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(PPARG > 0, 'PPARG+', 'PPARG-')) %>% 
+  data.frame(sub_seurat@meta.data, check.names = F, row.names = NULL) %>% 
+  mutate(Age2 = as.numeric(sub('Wk', '', Age))) %>% 
+  group_by(Region, Age2) %>% 
+  group_modify(~ left_join(filter(.x, label == 'PPARG+') %>% count(cell),
+                           count(.x, cell), by = 'cell') %>% 
+                 rename(x = 2, y = 3)) %>% 
+  mutate(perc = x / y * 100)
+
+map(unique(data$Region), ~
+      filter(data, Region == .x) %>% 
+      ggplot(aes(Age2, perc)) +
+      geom_line(aes(color = cell), linetype = 'solid', linewidth = .6) +
+      geom_point(aes(fill = cell), shape = 21, color = 'white', size = 3, stroke = 1) + 
+      labs(x = 'Weeks post-conception', y = 'PPARG+ cell percentage in each cell type (%)', 
+           title = .x) +
+      scale_color_brewer(palette = 'Set3') +
+      scale_fill_brewer(palette = 'Set3') +
+      scale_x_continuous(n.breaks = 10) +
+      theme_pubr() +
+      theme(aspect.ratio = 1/2,
+            plot.title = element_text(face = 'bold', hjust = .5),
+            axis.ticks.length = unit(2, 'mm')) +
+      guides(color = guide_legend(position = 'right')) ) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', nrow = 2)
+ggsave('PPARG.percent.fetal.by_Region.lineplot.pdf', width = 8, height = 7)
+
+# HNF4A
+data <- FetchData(sub_seurat, vars = c('HNF4A')) %>% 
+  add_column(cell = sub_seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(HNF4A > 0, 'HNF4A+', 'HNF4A-')) %>% 
+  data.frame(sub_seurat@meta.data, check.names = F, row.names = NULL) %>% 
+  mutate(Age2 = as.numeric(sub('Wk', '', Age))) %>% 
+  group_by(Region, Age2) %>% 
+  group_modify(~ left_join(filter(.x, label == 'HNF4A+') %>% count(cell),
+                           count(.x, cell), by = 'cell') %>% 
+                 rename(x = 2, y = 3)) %>% 
+  mutate(perc = x / y * 100)
+
+map(unique(data$Region), ~
+      filter(data, Region == .x) %>% 
+      ggplot(aes(Age2, perc)) +
+      geom_line(aes(color = cell), linetype = 'solid', linewidth = .6) +
+      geom_point(aes(fill = cell), shape = 21, color = 'white', size = 3, stroke = 1) + 
+      labs(x = 'Weeks post-conception', y = 'HNF4A+ cell percentage in each cell type (%)', 
+           title = .x) +
+      scale_color_brewer(palette = 'Set3') +
+      scale_fill_brewer(palette = 'Set3') +
+      scale_x_continuous(n.breaks = 10) +
+      theme_pubr() +
+      theme(aspect.ratio = 1/2,
+            plot.title = element_text(face = 'bold', hjust = .5),
+            axis.ticks.length = unit(2, 'mm')) +
+      guides(color = guide_legend(position = 'right')) ) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', nrow = 2)
+ggsave('HNF4A.percent.fetal.by_Region.lineplot.pdf', width = 8, height = 7)
+
+# HNF4G
+data <- FetchData(sub_seurat, vars = c('HNF4G')) %>% 
+  add_column(cell = sub_seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(HNF4G > 0, 'HNF4G+', 'HNF4G-')) %>% 
+  data.frame(sub_seurat@meta.data, check.names = F, row.names = NULL) %>% 
+  mutate(Age2 = as.numeric(sub('Wk', '', Age))) %>% 
+  group_by(Region, Age2) %>% 
+  group_modify(~ left_join(filter(.x, label == 'HNF4G+') %>% count(cell),
+                           count(.x, cell), by = 'cell') %>% 
+                 rename(x = 2, y = 3)) %>% 
+  mutate(perc = x / y * 100)
+
+map(unique(data$Region), ~
+      filter(data, Region == .x) %>% 
+      ggplot(aes(Age2, perc)) +
+      geom_line(aes(color = cell), linetype = 'solid', linewidth = .6) +
+      geom_point(aes(fill = cell), shape = 21, color = 'white', size = 3, stroke = 1) + 
+      labs(x = 'Weeks post-conception', y = 'HNF4G+ cell percentage in each cell type (%)', 
+           title = .x) +
+      scale_color_brewer(palette = 'Set3') +
+      scale_fill_brewer(palette = 'Set3') +
+      scale_x_continuous(n.breaks = 10) +
+      theme_pubr() +
+      theme(aspect.ratio = 1/2,
+            plot.title = element_text(face = 'bold', hjust = .5),
+            axis.ticks.length = unit(2, 'mm')) +
+      guides(color = guide_legend(position = 'right')) ) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', nrow = 2)
+ggsave('HNF4G.percent.fetal.by_Region.lineplot.pdf', width = 8, height = 7)
+```
+
+## SmillieCS_2019.Homo
+
+```{R}
+#### read ####
+count <- Read10X('data/expression/Epi_5cdc540d328cee7a2efc2348/', gene.column = 1, cell.column = 1)
+seurat <- CreateSeuratObject(counts = count, project = 'epithelium')
+
+metadata <- read.delim('data/metadata/all.meta2.txt')[-1,]
+seurat$Cluster <- metadata$Cluster[match(rownames(seurat@meta.data), metadata$NAME)]
+seurat$Subject <- metadata$Subject[match(rownames(seurat@meta.data), metadata$NAME)]
+seurat$Health <- metadata$Health[match(rownames(seurat@meta.data), metadata$NAME)]
+seurat$Sample <- metadata$Sample[match(rownames(seurat@meta.data), metadata$NAME)]
+
+saveRDS(seurat, 'seurat.raw.rds')
+
+dim(seurat)
+# [1]  20028 123006
+
+#### feature plot ####
+source('/data/mengjx/R_proj/R_func/plot_dim.R')
+source('/data/mengjx/R_proj/R_func/palette.R')
+
+data <- read.delim('data/cluster/Epi.tsne.txt', header = F, col.names = c('name', 'X1', 'X2')) %>% 
+  left_join(metadata, by = c('name' = 'NAME'))
+
+ggscatter(data, 'X1', 'X2', color = 'Cluster', palette = palette_discrete('paired2'),
+          xlab = 'tsne_1', ylab = 'tsne_2', size = .2, legend = 'right') +
+  scale_x_continuous(expand = c(.02, .02)) +
+  scale_y_continuous(expand = c(.02, .02)) +
+  theme(axis.ticks = element_line(linewidth = .5, color = 'black'),
+        axis.ticks.length = unit(2, 'mm'),
+        axis.title = element_text(size = 12, color = 'black'),
+        axis.text = element_text(size = 12, color = 'black'),
+        axis.line = element_line(linewidth = .5, color = 'black'),
+        panel.grid = element_blank(), 
+        aspect.ratio = 1)
+ggsave('tsne.marker.dimplot.jpg', width = 8, height = 6, bg = '#ffffff')
+
+#### PCA and cluster ####
+seurat <- readRDS('seurat.raw.rds')
+
+seurat <- NormalizeData(seurat, normalization.method = 'LogNormalize', scale.factor = 1e4, verbose = T) # 标准化
+seurat <- FindVariableFeatures(seurat, selection.method = 'vst', nfeatures = 2000) # 筛选高变基因
+seurat <- ScaleData(seurat) # 数据归一化，这步骤有一步回归的分析，去除噪声
+seurat <- RunPCA(seurat, features = VariableFeatures(seurat)) # PCA线性降维分析
+
+Idents(seurat) <- 'cluster'
+allmarkers <- FindAllMarkers(seurat, only.pos = T, min.pct = 0.25, logfc.threshold = 0.25)
+saveRDS(allmarkers, 'allmarkers.cell.rds')
+write.xlsx(allmarkers, 'allmarkers.cell.xlsx')
+
+saveRDS(seurat, 'seurat.out.rds')
+
+#### different genes ####
+cell_level <- levels(Idents(seurat))
+
+diffs <- map(cell_level, ~ FindMarkers(subset(seurat, cluster == .x), ident.1 = 'Inflamed', 
+                                       ident.2 = 'Healthy', group.by = 'health') %>% 
+               rownames_to_column('name') ) %>% 
+  set_names(cell_level)
+saveRDS(diffs, 'diffs.Inflamed_vs_healthy.rds')
+write.xlsx(diffs, 'diffs.Inflamed_vs_healthy.xlsx')
+
+diffs <- map(cell_level, ~ FindMarkers(subset(seurat, cluster == .x), ident.1 = 'Non-inflamed', 
+                                       ident.2 = 'Healthy', group.by = 'health') %>% 
+               rownames_to_column('name') ) %>% 
+  set_names(cell_level)
+saveRDS(diffs, 'diffs.NonInflamed_vs_healthy.rds')
+write.xlsx(diffs, 'diffs.NonInflamed_vs_healthy.xlsx')
+
+#### GSEA KEGG ####
+options(clusterProfiler.download.method = 'curl', timeout = 100)
+pacman::p_load(org.Hs.eg.db, KEGGREST, clusterProfiler, BiocParallel)
+register(SerialParam())
+
+diffs <- readRDS('diffs.Inflamed_vs_healthy.rds')
+diffs <- readRDS('diffs.NonInflamed_vs_healthy.rds')
+
+gene_info <- AnnotationDbi::select(org.Hs.eg.db, keys(org.Hs.eg.db),
+                                   keytype = 'ENTREZID', columns = c('SYMBOL'))
+
+gseKEGG <- map(diffs, ~ mutate(.x, ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+                 filter(!is.na(ENTREZID)) %>% 
+                 pull(avg_log2FC, name = ENTREZID) %>% 
+                 sort(decreasing = T) %>% 
+                 gseKEGG(organism = 'hsa', pvalueCutoff = 1) %>% 
+                 data.frame() )
+write.xlsx(gseKEGG, 'diffs.gseKEGG.NonInflamed_vs_healthy.xlsx')
+
+#### ORA KEGG ####
+diffs <- readRDS('diffs.Inflamed_vs_healthy.rds')
+diffs <- readRDS('diffs.NonInflamed_vs_healthy.rds')
+
+# all genes
+eKEGG <- map(diffs, ~ filter(.x, p_val_adj < .05 & abs(avg_log2FC) > .25) %>%
+               mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+               pull(ENTREZID) %>% 
+               na.omit %>% 
+               enrichKEGG(organism = 'hsa', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+               data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eKEGG, 'diffs.eKEGG.all_gene.NonInflamed_vs_healthy.xlsx')
+
+# up genes
+eKEGG <- map(diffs, ~ filter(.x, p_val_adj < .05 & avg_log2FC > .25) %>% 
+               mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+               pull(ENTREZID) %>% 
+               na.omit %>% 
+               enrichKEGG(organism = 'hsa', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+               data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eKEGG, 'diffs.eKEGG.up_gene.NonInflamed_vs_healthy.xlsx')
+
+# down genes
+eKEGG <- map(diffs, ~ filter(.x, p_val_adj < .05 & avg_log2FC < -.25) %>% 
+               mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+               pull(ENTREZID) %>% 
+               na.omit %>% 
+               enrichKEGG(organism = 'hsa', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+               data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eKEGG, 'diffs.eKEGG.down_gene.NonInflamed_vs_healthy.xlsx')
+
+#### ORA GO ####
+diffs <- readRDS('diffs.Inflamed_vs_healthy.rds')
+diffs <- readRDS('diffs.NonInflamed_vs_healthy.rds')
+
+# all genes
+eGO <- map(diffs, ~ filter(.x, p_val_adj < .05 & abs(avg_log2FC) > .25) %>% 
+             pull(name) %>% 
+             enrichGO(OrgDb = 'org.Hs.eg.db', keyType = 'SYMBOL',
+                      pvalueCutoff = .2, qvalueCutoff = .2, ont = 'ALL') %>% 
+             data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eGO, 'diffs.eGO.all_gene.NonInflamed_vs_healthy.xlsx')
+
+# up genes
+eGO <- map(diffs, ~ filter(.x, p_val_adj < .05 & avg_log2FC > .25) %>% 
+             pull(name) %>% 
+             na.omit %>% 
+             enrichGO(OrgDb = 'org.Hs.eg.db', keyType = 'SYMBOL',
+                      pvalueCutoff = .2, qvalueCutoff = .2, ont = 'ALL') %>% 
+             data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eGO, 'diffs.eGO.up_gene.NonInflamed_vs_healthy.xlsx')
+
+# down genes
+eGO <- map(diffs, ~ filter(.x, p_val_adj < .05 & avg_log2FC < -.25) %>% 
+             pull(name) %>%  
+             na.omit %>% 
+             enrichGO(OrgDb = 'org.Hs.eg.db', keyType = 'SYMBOL',
+                      pvalueCutoff = .2, qvalueCutoff = .2, ont = 'ALL') %>% 
+             data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eGO, 'diffs.eGO.down_gene.NonInflamed_vs_healthy.xlsx')
+
+#### PPARα/PPARγ/HNF4α/HNF4γ ####
+seurat <- readRDS('seurat.out.rds')
+
+# PPARα
+data <- FetchData(seurat, vars = c('PPARA')) %>% 
+  add_column(cells = seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(PPARA > 0, 'PPARA+', 'PPARA-'))
+
+left_join(x = filter(data, label == 'PPARA+') %>% count(cells),
+          y = count(data, cells), by = 'cells') %>% 
+  rename(x = 2, y = 3) %>% 
+  mutate(perc = x / y * 100) %>% 
+  ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '', 
+            ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+            rotate = T, title = 'PPARA+ cell percentage in each cell type') +
+  scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+        aspect.ratio = 2)
+ggsave('PPARA.percent.barplot.pdf', width = 5, height = 6)
+
+# PPARγ
+data <- FetchData(seurat, vars = c('PPARG')) %>% 
+  add_column(cells = seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(PPARG > 0, 'PPARG+', 'PPARG-'))
+
+left_join(x = filter(data, label == 'PPARG+') %>% count(cells),
+          y = count(data, cells), by = 'cells') %>% 
+  rename(x = 2, y = 3) %>% 
+  mutate(perc = x / y * 100) %>% 
+  ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '',
+            ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+            rotate = T, title = 'PPARG+ cell percentage in each cell type') +
+  scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+        aspect.ratio = 2)
+ggsave('PPARG.percent.barplot.pdf', width = 5, height = 6)
+
+# HNF4α
+data <- FetchData(seurat, vars = c('HNF4A')) %>% 
+  add_column(cells = seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(HNF4A > 0, 'HNF4A+', 'HNF4A-'))
+
+left_join(x = filter(data, label == 'HNF4A+') %>% count(cells),
+          y = count(data, cells), by = 'cells') %>% 
+  rename(x = 2, y = 3) %>% 
+  mutate(perc = x / y * 100) %>% 
+  ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '', 
+            ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+            rotate = T, title = 'HNF4A+ cell percentage in each cell type') +
+  scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+        aspect.ratio = 2)
+ggsave('HNF4A.percent.barplot.pdf', width = 5, height = 6.5)
+
+# HNF4γ
+data <- FetchData(seurat, vars = c('HNF4G')) %>% 
+  add_column(cells = seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(HNF4G > 0, 'HNF4G+', 'HNF4G-'))
+
+left_join(x = filter(data, label == 'HNF4G+') %>% count(cells),
+          y = count(data, cells), by = 'cells') %>% 
+  rename(x = 2, y = 3) %>% 
+  mutate(perc = x / y * 100) %>% 
+  ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '', 
+            ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+            rotate = T, title = 'HNF4G+ cell percentage in each cell type') +
+  scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+        aspect.ratio = 2)
+ggsave('HNF4G.percent.barplot.pdf', width = 5, height = 6.5)
+```
+
+## ThomasMF_2024.Homo
+
+```{R}
+#### read ####
+group <- read.delim('data/group.txt')
+
+seurats <- map2(group$raw_sample, group$sample, ~ {
+  message(paste0('Reading: ', .x)) 
+  count <- Read10X_h5(paste0('data/GSE206301/', .x, '.mat.h5'))
+  CreateSeuratObject(counts = count, project = .y, min.cells = 5, min.features = 100) })
+
+seurat <- JoinLayers(merge(seurats[[1]], seurats[-1], add.cell.ids = group$raw_sample))
+saveRDS(seurat, 'seurat.raw.rds')
+
+dim(seurat)
+# [1]  24341 158130
+
+#### QC ####
+seurat <- readRDS('seurat.raw.rds')
+
+seurat <- PercentageFeatureSet(seurat, pattern = '^MT-', col.name = 'percent_mt') # 线粒体
+seurat <- PercentageFeatureSet(seurat, pattern = '^RP[SL]', col.name = 'percent_rb') # 核糖体
+seurat <- PercentageFeatureSet(seurat, pattern = '^HB[^(P)]', col.name = 'percent_hb') # 血红蛋白
+
+p1 <- VlnPlot(seurat, group.by = 'orig.ident', pt.size = 0, ncol = 2,
+              features = c('nFeature_RNA', 'nCount_RNA')) + NoLegend()
+
+p2 <- VlnPlot(seurat, group.by = 'orig.ident', pt.size = 0, ncol = 3,
+              features = c('percent_mt', 'percent_rb', 'percent_hb')) + 
+  scale_y_continuous(breaks = seq(0, 100, 5)) + NoLegend()
+
+cowplot::plot_grid(p1, p2, ncol = 1, align = 'v')
+ggsave('qc_before.pdf', width = 18, height = 10)
+
+# 细胞过滤
+# IBD 细胞损伤严重，因此，选择不过滤seurat基因
+seurat <- subset(seurat, subset = percent_mt < 20 & nFeature_RNA > 100 & 
+                   nFeature_RNA < 6000 & percent_hb < 1)
+
+p1 <- VlnPlot(seurat, group.by = 'orig.ident', pt.size = 0, ncol = 2,
+              features = c('nFeature_RNA', 'nCount_RNA')) + NoLegend()
+
+p2 <- VlnPlot(seurat, group.by = 'orig.ident', pt.size = 0, ncol = 3,
+              features = c('percent_mt', 'percent_rb', 'percent_hb') ) + NoLegend()
+
+cowplot::plot_grid(p1, p2, ncol = 1, align = 'v')
+ggsave('qc_after.pdf', width = 18, height = 10)
+
+dim(seurat)
+# [1]  24341 118037
+
+#### PCA and cluster ####
+seurat <- NormalizeData(seurat, normalization.method = 'LogNormalize', scale.factor = 1e4, verbose = T) # 标准化
+seurat <- FindVariableFeatures(seurat, selection.method = 'vst', nfeatures = 2000) # 筛选高变基因
+VariableFeaturePlot(seurat, cols = c('grey','red'))
+seurat <- ScaleData(seurat) # 数据归一化，这步骤有一步回归的分析，去除噪声
+seurat <- RunPCA(seurat, features = VariableFeatures(seurat)) # PCA线性降维分析
+ElbowPlot(seurat, ndims = 30) # 流石图协助选择PC维度 10
+seurat <- RunHarmony(seurat, 'orig.ident') # Harmony去批次
+seurat <- RunUMAP(seurat, dims = 1:10, reduction = 'harmony')
+seurat <- RunTSNE(seurat, dims = 1:10, reduction = 'harmony')
+seurat <- FindNeighbors(seurat, reduction = 'harmony', dims = 1:10)
+seurat <- FindClusters(seurat, resolution = c(seq(0, 1.9, .2)))
+
+map2(paste0('RNA_snn_res.', seq(0, 1.9, .2)), paste0('SNN-', seq(0, 1.9, .2)), ~
+       DimPlot(seurat, reduction = 'tsne', group.by = .x, label = T) +
+       ggtitle(.y) + 
+       theme(aspect.ratio = 1) + 
+       guides(color = 'none')) %>% 
+  plot_grid(plotlist = ., nrow = 2)
+ggsave('tsne.SNN.dimplot.jpg', width = 20, height = 8, bg = '#ffffff')
+
+map2(paste0('RNA_snn_res.', seq(0, 1.9, .2)), paste0('SNN: ', seq(0, 1.9, .2)), ~
+       DimPlot(seurat, reduction = 'umap', group.by = .x, label = T) +
+       ggtitle(.y) + 
+       theme(aspect.ratio = 1) + 
+       guides(color = 'none')) %>% 
+  plot_grid(plotlist = ., nrow = 2)
+ggsave('umap.SNN.dimplot.jpg', width = 20, height = 8, bg = '#ffffff')
+
+#### marker identify ####  
+# 细胞基因标记
+markers <- list(
+  Stem_cell = c('LGR5','HOPX','BMI1','ASCL2','OLFM4','SMOC2'),
+  TA_cell = c('MKI67', 'PCNA', 'TOP2A', 'CCNA2', 'MCM5'),
+  Paneth_cell = c('DEFA5','LYZ','AGR2','MPTX1'),
+  Goblet_cell = c('MUC2','CCL9','CLCA1','TFF3','AGR2','FCGBP','ZG16'),
+  Enteroendocrine_cell = c('CHGA','NEUROG3','CHGB','TAC1','TPH1'),
+  Tuft_cell = c('DCLK1','TRPM5','AVIL','LRMP'),
+  Enterocyte = c('ALDOB','APOA1','APOA4','GSTA1','FABP1','PRAP1'),
+  Epithelial_cell = c('EPCAM ','VIL1','KRT20','CLDN7','CDH1'),
+  Lymphocyte = c('CD3E','CD3G'),
+  B_cell = c('CD79A','JCHAIN','IGHA1','IGKC','CD19','CD79B','MS4A1'), # CD20->MS4A1
+  T_cell = c('CD3G','CD4','CD8A','TRGC1','TRGC2','GZMA','GZMB'),
+  CD8_T_cell = c('CD3D','CD8A','CD8B','CD3E','CD3'), 
+  CD4_T_cell = c('CD3D','CD4','IL7R','LTB','CD3'), 
+  gdT_cell = c('TRDV2','TRGV9'),
+  NK_cell = c('NCAM1','KLRF1','FGFBP2','FCG3RA','CX3CR1','GNLY','NKG7','TYOBP','PRF1'), 
+  Plasmablast = c('XBP1','RF4','PRDM1','PAX5'), # 浆母细胞
+  Plasma_cell = c('CD79A','IGHG1','MZB1','SDC1'), # 浆细胞
+  Neutrophils = c('FCGR3B','MMP9','CST3','LYZ','CSF3R'),
+  CD14_monocyte = c('CD14','LYZ','CD33','FCN1'),
+  CD16_monocyte = c('CD14','FCGR3A','CD33','LYN'),
+  M1_Macrophage = c('CD80','CD86','INOS'), # 经典激活型巨噬细胞（classically activated macrophages）
+  M2_Macrophage = c('CD163','CD206'), # 交替激活型巨噬细胞（alternatively activated macrophages）
+  Endothelial_cell = c('PTPRB','PECAM1'),
+  Platelet = c('PPBP','CD41'), # 血小板
+  Epithelial_cell = c('EPCAM','CK13','CK5'), # 上皮细胞
+  Erythroblast = c('MKI67','HBA1','HBB'), # 成红血细胞，红细胞成熟过程中的特定阶段细胞
+  cDendritic_cell1 = c('CLEC9A','CADM1'), # conventional dendritic 传统树突状细胞1
+  cDendritic_cell2 = c('CST3','COTL1','LYZ','DMXL2','CLEC10A','FCER1A'), # conventional dendritic 传统树突状细胞1
+  pDendritic_cell = c('IL3RA','GZMB','SERPINF1','ITM2C'), # plasmacytoid dendritic 浆细胞样树突状细胞
+  HSC = c('NRIP1','MECOM','PROM1','NKAIN2','CD34') # Hematopoietic Stem Cell 造血干细胞
+  )
+
+# featureplots-tsne
+markers <- map(markers, ~ .x[.x %in% rownames(seurat)])
+max_len <- map_vec(markers, ~ length(.x)) %>% max()
+map2(markers, names(markers), \(x, y) {
+  p_text <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold',
+                        label = stringr::str_to_title(gsub('_', ' ', y))) + 
+                   theme_void())
+  p_feats <- map(x, ~ FeaturePlot(seurat, reduction = 'tsne', features = .x) + 
+                   theme(aspect.ratio = 1))
+  p_void <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold') + 
+                   theme_void())
+  cowplot::plot_grid(plotlist = c(p_text, p_feats, rep(p_void, times = max_len - length(x))), 
+                     nrow = 1)  } ) %>%
+  cowplot::plot_grid(plotlist = ., align = 'v', ncol = 1)
+ggsave('tsne.featureplot.jpg', width = 4 * max_len + 4, height = 4 * length(markers), 
+       limitsize = F, bg = '#ffffff')
+
+# featureplots-umap
+map2(markers, names(markers), \(x, y) {
+  p_text <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold',
+                        label = stringr::str_to_title(gsub('_', ' ', y))) + 
+                   theme_void())
+  p_feats <- map(x, ~ FeaturePlot(seurat, reduction = 'umap', features = .x) + 
+                   theme(aspect.ratio = 1))
+  p_void <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold') + 
+                   theme_void())
+  cowplot::plot_grid(plotlist = c(p_text, p_feats, rep(p_void, times = max_len - length(x))), 
+                     nrow = 1)  } ) %>%
+  cowplot::plot_grid(plotlist = ., align = 'v', ncol = 1)
+ggsave('umap.featureplot.jpg', width = 4 * max_len + 4, height = 4 * length(markers), 
+       limitsize = F, bg = '#ffffff')
+
+seurat <- SetIdent(seurat, value = 'RNA_snn_res.0.8')
+
+# featureplot-tsne
+DimPlot(seurat, reduction = 'tsne', label = T, alpha = 1, raster = F) + 
+  NoLegend() + theme(aspect.ratio = 1)
+ggsave('tsne.SNN.0.8.dimplot.pdf', width = 6, height = 6, bg = '#ffffff')
+
+# featureplot-umap
+DimPlot(seurat, reduction = 'umap', label = T, alpha = 1, raster = F) + 
+  NoLegend() + theme(aspect.ratio = 1)
+ggsave('umap.SNN.0.8.dimplot.pdf', width = 6, height = 6, bg = '#ffffff')
+
+# 鉴定每个cluster中的marker
+allmarkers <- FindAllMarkers(seurat, only.pos = T, min.pct = 0.25, logfc.threshold = 0.25)
+saveRDS(allmarkers, 'allmarkers.cluster.rds')
+write.xlsx(allmarkers, 'allmarkers.cluster.xlsx')
+
+# 其他基因标记
+markers <- list(
+  Wnt = rownames(seurat)[grepl('WNT', rownames(seurat))],
+  Bmp = rownames(seurat)[grepl('BMP', rownames(seurat))],
+  Egf = rownames(seurat)[grepl('EGF', rownames(seurat))],
+  Efnb = rownames(seurat)[grepl('EFNB', rownames(seurat))] )
+
+# featureplots-tsne
+markers <- map(markers, ~ .x[.x %in% rownames(seurat)])
+max_len <- map_vec(markers, ~ length(.x)) %>% max()
+map2(markers, names(markers), \(x, y) {
+  p_text <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold',
+                        label = stringr::str_to_title(gsub('_', ' ', y))) + 
+                   theme_void())
+  p_feats <- map(x, ~ FeaturePlot(seurat, reduction = 'tsne', features = .x) + 
+                   theme(aspect.ratio = 1))
+  p_void <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold') + 
+                   theme_void())
+  cowplot::plot_grid(plotlist = c(p_text, p_feats, rep(p_void, times = max_len - length(x))), 
+                     nrow = 1)  } ) %>%
+  cowplot::plot_grid(plotlist = ., align = 'v', ncol = 1)
+ggsave('tsne.featureplot.others.jpg', width = 4 * max_len + 4, height = 4 * length(markers), 
+       limitsize = F, bg = '#ffffff')
+
+# featureplots-umap
+map2(markers, names(markers), \(x, y) {
+  p_text <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold',
+                        label = stringr::str_to_title(gsub('_', ' ', y))) + 
+                   theme_void())
+  p_feats <- map(x, ~ FeaturePlot(seurat, reduction = 'umap', features = .x) + 
+                   theme(aspect.ratio = 1))
+  p_void <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold') + 
+                   theme_void())
+  cowplot::plot_grid(plotlist = c(p_text, p_feats, rep(p_void, times = max_len - length(x))), 
+                     nrow = 1)  } ) %>%
+  cowplot::plot_grid(plotlist = ., align = 'v', ncol = 1)
+ggsave('umap.featureplot.others.jpg', width = 4 * max_len + 4, height = 4 * length(markers), 
+       limitsize = F, bg = '#ffffff')
+
+#### marker annotate ####e
+# marker 自动注释
+markers <- list(
+  Stem_cell = c('LGR5','HOPX','BMI1','ASCL2','OLFM4','SMOC2'),
+  TA_cell = c('MKI67', 'PCNA', 'TOP2A', 'CCNA2', 'MCM5'),
+  Paneth_cell = c('DEFA5','LYZ','AGR2','MPTX1'),
+  Goblet_cell = c('MUC2','CCL9','CLCA1','TFF3','AGR2','FCGBP','ZG16'),
+  Enteroendocrine_cell = c('CHGA','NEUROG3','CHGB','TAC1','TPH1'),
+  Tuft_cell = c('DCLK1','TRPM5','AVIL','LRMP'),
+  Enterocyte = c('ALDOB','APOA1','APOA4','GSTA1','FABP1','PRAP1'),
+  Epithelial_cell = c('EPCAM ','VIL1','KRT20','CLDN7','CDH1'),
+  Lymphocyte = c('CD3E','CD3G'),
+  B_cell = c('CD79A','JCHAIN','IGHA1','IGKC','CD19','CD79B','MS4A1'), # CD20->MS4A1
+  T_cell = c('CD3G','CD4','CD8A','TRGC1','TRGC2','GZMA','GZMB'),
+  CD8_T_cell = c('CD3D','CD8A','CD8B','CD3E','CD3'), 
+  CD4_T_cell = c('CD3D','CD4','IL7R','LTB','CD3'), 
+  gdT_cell = c('TRDV2','TRGV9'),
+  NK_cell = c('NCAM1','KLRF1','FGFBP2','FCG3RA','CX3CR1','GNLY','NKG7','TYOBP','PRF1'), 
+  Plasmablast = c('XBP1','RF4','PRDM1','PAX5'), # 浆母细胞
+  Plasma_cell = c('CD79A','IGHG1','MZB1','SDC1'), # 浆细胞
+  Neutrophils = c('FCGR3B','MMP9','CST3','LYZ','CSF3R'),
+  CD14_monocyte = c('CD14','LYZ','CD33','FCN1'),
+  CD16_monocyte = c('CD14','FCGR3A','CD33','LYN'),
+  M1_Macrophage = c('CD80','CD86','INOS'), # 经典激活型巨噬细胞（classically activated macrophages）
+  M2_Macrophage = c('CD163','CD206'), # 交替激活型巨噬细胞（alternatively activated macrophages）
+  Endothelial_cell = c('PTPRB','PECAM1'),
+  Platelet = c('PPBP','CD41'), # 血小板
+  Epithelial_cell = c('EPCAM','CK13','CK5'), # 上皮细胞
+  Erythroblast = c('MKI67','HBA1','HBB'), # 成红血细胞，红细胞成熟过程中的特定阶段细胞
+  cDendritic_cell1 = c('CLEC9A','CADM1'), # conventional dendritic 传统树突状细胞1
+  cDendritic_cell2 = c('CST3','COTL1','LYZ','DMXL2','CLEC10A','FCER1A'), # conventional dendritic 传统树突状细胞1
+  pDendritic_cell = c('IL3RA','GZMB','SERPINF1','ITM2C'), # plasmacytoid dendritic 浆细胞样树突状细胞
+  HSC = c('NRIP1','MECOM','PROM1','NKAIN2','CD34') # Hematopoietic Stem Cell 造血干细胞
+  )
+
+map(markers, ~ filter(allmarkers, gene %in% .x) ) %>% 
+  keep(~ nrow(.x) != 0) %>% 
+  map(~ group_by(.x, cluster) %>% 
+        group_modify(~ data.frame(match_n = nrow(.x), genes = paste(.x$gene, collapse = ',')))) %>% 
+  map2_df(names(.), ~ add_column(.x, gene = .y, .before = 1)) %>% 
+  data.frame() %>% 
+  arrange(cluster)
+
+seurat <- RenameIdents(seurat, 
+                       '0' = 'Epithelial_cell', '1' = 'Epithelial_cell', '2' = 'Stem/TA_cell', 
+                       '3' = 'Goblet_cell', '4' = 'Enterocyte', '5' = 'Enterocyte',
+                       '6' = 'Epithelial_cell', '7' = 'Lymphocyte', '8' = 'Enterocyte', 
+                       '9' = 'Unknown', '10' = 'Goblet_cell', '11' = 'Epithelial_cell',
+                       '12' = 'Enterocyte', '13' = 'Paneth_cell', '14' = 'B_cell', 
+                       '15' = 'Unknown', '16' = 'Goblet_cell', '17' = 'Endothelial_cell',
+                       '18' = 'Epithelial_cell', '19' = 'Tuft/Enteroendocrine_cell', '20' = 'Enterocyte',
+                       '21' = 'Paneth_cell', '22' = 'Goblet_cell', '23' = 'Goblet_cell',
+                       '24' = 'Enterocyte', '25' = 'Endothelial_cell')
+
+# 疑难细胞群注释
+allmarkers %>% 
+  filter(p_val_adj < 0.001 & cluster == '14') %>% 
+  pull() %>% 
+  scRNA_marker_match(tissue = 'intestine', org = 'human') %>% 
+  select(-species, -tissue, -cell, -gene) %>% 
+  filter(grepl('intestine', item)) %>% 
+  data.frame() %>% 
+  head(10)
+
+# 可视化-tsne 
+DimPlot(seurat, reduction = 'tsne', label = T, alpha = 1, cols = 'Set3', raster = F) + 
+  theme(aspect.ratio = 1) + NoLegend()
+ggsave('tsne.marker.dimplot.pdf', width = 6, height = 6, bg = '#ffffff')
+
+DimPlot(seurat, reduction = 'umap', label = T, alpha = 1, cols = 'Set3', raster = F) + 
+  theme(aspect.ratio = 1) + NoLegend()
+ggsave('umap.marker.dimplot.pdf', width = 6, height = 6, bg = '#ffffff')
+
+group <- read.delim('data/group.txt') %>% 
+  dplyr::select(sample, group)
+seurat$group <- group$group[match(seurat$orig.ident, group$sample)]
+
+DimPlot(seurat, reduction = 'tsne', label = T, alpha = 1, split.by = 'group', raster = F,
+        cols = 'Set3', label.size = 3) + theme(aspect.ratio = 1)
+ggsave('tsne.marker.dimplot.facet_by_group.pdf', width = 16, height = 5, bg = '#ffffff')
+
+DimPlot(seurat, reduction = 'umap', label = T, alpha = 1, split.by = 'group', raster = F,
+        cols = 'Set3', label.size = 3) + theme(aspect.ratio = 1)
+ggsave('umap.marker.dimplot.facet_by_group.pdf', width = 16, height = 5, bg = '#ffffff')
+
+# 差异基因
+allmarkers <- FindAllMarkers(seurat, only.pos = T, min.pct = 0.25, logfc.threshold = 0.25)
+saveRDS(allmarkers, 'allmarkers.cell.rds')
+write.xlsx(allmarkers, 'allmarkers.cell.xlsx')
+
+# 保存seurat对象
+saveRDS(seurat, 'seurat.out.rds')
+seurat <- readRDS('seurat.out.rds')
+
+#### different genes ####
+seurat <- readRDS('seurat.out.rds')
+
+cell_level <- levels(Idents(seurat))
+
+diffs <- map(cell_level, \(x) 
+             FindMarkers(subset(seurat, idents = x), ident.1 = 'irColitisCase', 
+                         ident.2 = 'ControlHealthy', group.by = 'group') %>% 
+               rownames_to_column('name') ) %>% 
+  set_names(cell_level)
+saveRDS(diffs, 'diffs.rds')
+write.xlsx(diffs, 'diffs.xlsx')
+
+#### GSEA KEGG ####
+options(clusterProfiler.download.method = 'wget', timeout = 150)
+pacman::p_load(org.Hs.eg.db, clusterProfiler, BiocParallel)
+register(SerialParam())
+
+gene_info <- AnnotationDbi::select(org.Hs.eg.db, keys(org.Hs.eg.db), 
+                                   keytype = 'ENTREZID', columns = c('SYMBOL'))
+
+diffs <- readRDS('diffs.rds')
+
+gseKEGG <- map(diffs, ~ mutate(.x, ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+                 filter(!is.na(ENTREZID)) %>% 
+                 pull(avg_log2FC, name = ENTREZID) %>% 
+                 sort(decreasing = T) %>% 
+                 gseKEGG(organism = 'hsa', pvalueCutoff = 1) %>% 
+                 data.frame() )
+write.xlsx(gseKEGG, 'diffs.gseKEGG.xlsx')
+
+#### ORA KEGG ####
+# all genes
+eKEGG <- map(diffs, ~ filter(.x, p_val_adj < .05 & abs(avg_log2FC) > .25) %>% 
+               mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+               pull(ENTREZID) %>% 
+               na.omit %>% 
+               enrichKEGG(organism = 'hsa', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+               data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eKEGG, 'diffs.eKEGG.all_genes.xlsx')
+
+# up genes
+eKEGG <- map(diffs, ~ filter(.x, p_val_adj < .05 & avg_log2FC > .25) %>%
+               mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+               pull(ENTREZID) %>% 
+               na.omit %>% 
+               enrichKEGG(organism = 'hsa', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+               data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eKEGG, 'diffs.eKEGG.up_genes.xlsx')
+
+# down genes
+eKEGG <- map(diffs, ~ filter(.x, p_val_adj < .05 & avg_log2FC < -.25) %>% 
+               mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+               pull(ENTREZID) %>% 
+               na.omit %>% 
+               enrichKEGG(organism = 'hsa', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+               data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eKEGG, 'diffs.eKEGG.down_genes.xlsx')
+
+#### ORA GO ####
+# all genes
+eGO <- map(diffs, ~ filter(.x, p_val_adj < .05 & abs(avg_log2FC) > .25) %>% 
+             pull(name) %>% 
+             enrichGO(OrgDb = 'org.Hs.eg.db', keyType = 'SYMBOL',
+                      pvalueCutoff = .2, qvalueCutoff = .2, ont = 'ALL') %>% 
+             data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eGO, 'diffs.eGO.all_genes.xlsx')
+
+# up genes
+eGO <- map(diffs, ~ filter(.x, p_val_adj < .05 & avg_log2FC > .25) %>% 
+             pull(name) %>% 
+             na.omit() %>% 
+             enrichGO(OrgDb = 'org.Hs.eg.db', keyType = 'SYMBOL',
+                      pvalueCutoff = .2, qvalueCutoff = .2, ont = 'ALL') %>% 
+             data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eGO, 'diffs.eGO.up_genes.xlsx')
+
+# down genes
+eGO <- map(diffs, ~ filter(.x, p_val_adj < .05 & avg_log2FC < -.25) %>% 
+             pull(name) %>%  
+             na.omit() %>% 
+             enrichGO(OrgDb = 'org.Hs.eg.db', keyType = 'SYMBOL',
+                      pvalueCutoff = .2, qvalueCutoff = .2, ont = 'ALL') %>% 
+             data.frame(row.names = NULL) ) %>% 
+  keep(~ nrow(.x) != 0)
+write.xlsx(eGO, 'diffs.eGO.down_genes.xlsx')
+
+#### PPARα/PPARγ/HNF4α/HNF4γ in_gene_type ####
+seurat <- readRDS('seurat.out.rds')
+
+# PPARα
+data <- FetchData(seurat, vars = c('PPARA')) %>% 
+  add_column(cells = seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(PPARA > 0, 'PPARA+', 'PPARA-'))
+
+left_join(x = filter(data, label == 'PPARA+') %>% count(cells),
+          y = count(data, cells), by = 'cells') %>% 
+  rename(x = 2, y = 3) %>% 
+  mutate(perc = x / y * 100) %>% 
+  ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '', 
+            ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+            rotate = T, title = 'PPARA+ cell percentage in each cell type') +
+  scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+        aspect.ratio = 2)
+ggsave('PPARA.percent.barplot.pdf', width = 5, height = 6)
+
+# PPARγ
+data <- FetchData(seurat, vars = c('PPARG')) %>% 
+  add_column(cells = seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(PPARG > 0, 'PPARG+', 'PPARG-'))
+
+left_join(x = filter(data, label == 'PPARG+') %>% count(cells),
+          y = count(data, cells), by = 'cells') %>% 
+  rename(x = 2, y = 3) %>% 
+  mutate(perc = x / y * 100) %>% 
+  ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '',
+            ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+            rotate = T, title = 'PPARG+ cell percentage in each cell type') +
+  scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+        aspect.ratio = 2)
+ggsave('PPARG.percent.barplot.pdf', width = 5, height = 6)
+
+# HNF4α
+data <- FetchData(seurat, vars = c('HNF4A')) %>% 
+  add_column(cells = seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(HNF4A > 0, 'HNF4A+', 'HNF4A-'))
+
+left_join(x = filter(data, label == 'HNF4A+') %>% count(cells),
+          y = count(data, cells), by = 'cells') %>% 
+  rename(x = 2, y = 3) %>% 
+  mutate(perc = x / y * 100) %>% 
+  ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '', 
+            ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+            rotate = T, title = 'HNF4A+ cell percentage in each cell type') +
+  scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+        aspect.ratio = 2)
+ggsave('HNF4A.percent.barplot.pdf', width = 5, height = 6)
+
+# HNF4γ
+data <- FetchData(seurat, vars = c('HNF4G')) %>% 
+  add_column(cells = seurat@active.ident) %>% 
+  rownames_to_column('name') %>% 
+  mutate(label = ifelse(HNF4G > 0, 'HNF4G+', 'HNF4G-'))
+
+left_join(x = filter(data, label == 'HNF4G+') %>% count(cells),
+          y = count(data, cells), by = 'cells') %>% 
+  rename(x = 2, y = 3) %>% 
+  mutate(perc = x / y * 100) %>% 
+  ggbarplot('cells', 'perc', fill = 'cells', legend = 'none', xlab = '',
+            ylab = 'Percentage (%)', sort.val = 'asc', sort.by.groups = F,
+            rotate = T, title = 'HNF4G+ cell percentage in each cell type') +
+  scale_fill_manual(values = colorRampPalette(pald('rainbow3'))((length(unique(data$cells)))) %>% rev()) +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        panel.grid.major.x = element_line(color = 'grey90', linewidth = .5, linetype = 'longdash'),
+        aspect.ratio = 2)
+ggsave('HNF4G.percent.barplot.pdf', width = 5, height = 6)
+```

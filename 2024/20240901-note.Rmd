@@ -1,0 +1,1247 @@
+---
+title: "Pig gut metagenome collection and mining microbial genetical resource (No-published)"
+author: "Jinxin Meng"
+date: "2024-09-01"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+
+```
+
+## 00.mash_s1
+```{sh}
+le pigs_gut_metagenome_4333_file_list | parallel -j 2 --colsep="\t" seqkit seq -g -m 1500 -o contigs/{2}.m1500.fa {3}
+find /share/data1/mjx/proj/07.pigs_binning_mcvg_20230929/00.mash_s1/contigs/ -size "+1M" | filelist > contigs_3997.filelist
+cat contigs_3997.filelist | parallel -j 2 --colsep="\t" seqkit seq -g -m 5000 {2} \| seqkit replace -p \" \.\*\" -r \"\" \| seqkit replace -p \"\^\" -r \"{1}\|\" -o contigs_m5k/{1}.m5k.fa
+cat contigs_m5k/* | seqkit split2 --by-part 25 --by-part-prefix contigs_m5k_split/contigs.m5k.part_ -O contigs_m5k_split
+cat pigs_gut_metagenome_4333_file_list | csvtk join -H -t -f '2;1' - contigs_3997.filelist | csvtk cut -t -H -f 1,2,5,4 > samples_3997.filelist
+
+mash sketch -s 100000 -k 32 -p 32 -l contigs_3997.filepath -o contigs_3997
+cat contigs_3997.filelist | parallel -j 3 --colsep="\t" mash dist contigs_3997.msh {2} \| sort -nk3 \> dist_sort/{1}.dist
+```
+
+## 01.depth_s1
+```{sh}
+cut -f1 ../00.mash_s1/contigs_3997.filelist > samples_3997
+split -l 1000 -d 2 samples_3997 samples_3997.part_
+
+cat samples_3997.part_00 | parallel -j 5 run_mapping.sh {} depth_00
+cat samples_3997.part_01 | parallel -j 5 run_mapping.sh {} depth_01
+cat samples_3997.part_02 | parallel -j 5 run_mapping.sh {} depth_02
+cat samples_3997.part_03 | parallel -j 5 run_mapping.sh {} depth_03
+
+for i in 00 01 02 03;do realpath depth_$i/*depth | filelist > depth_$i.filelist ;done
+for i in 00 01 02 03;do cat samples_3997.part_$i | parallel -j 2 run_depth_combine.pl depth_$i.filelist {} 15 depth_combine/{} ;done
+
+realpath depth_combine/*depth | filelist > depth_combine.filelist
+cut -f2,3 ../00.mash_s1/samples_3997.filelist | csvtk join -H -t -f 1 - depth_combine.filelist > mcvg_config.filelist
+
+cat depth_*filelist | perl -lne '@s=split;@s2=split/_/, $s[0];print "$s2[0]\t$s[1]" if $s2[0] eq $s2[1]' > depth_single.filelist
+cut -f2,3 ../00.mash_s1/samples_3997.filelist | csvtk join -H -t -f 1 - depth_single.filelist > single_config.filelist
+
+#metabat2 -t 24 -m 1500 -s 200000 --saveCls --unbinned --seed 2024 -i /share/data1/mjx/proj/07.pigs_binning_mcvg_20230929/00.data/contigs/CNR0176253.m1500.fa -a CNR0176253.mcvg.depth -o tmp_mcvg/CNR0176253.bin 
+#metabat2 -t 24 -m 1500 -s 200000 --saveCls --unbinned --seed 2024 -i /share/data1/mjx/proj/07.pigs_binning_mcvg_20230929/00.data/contigs/CNR0176253.m1500.fa -a CNR0176253.single.depth -o tmp_single/CNR0176253.bin
+```
+
+## 02.bin_s1/
+```{sh}
+# mcvg binning
+split -l 200 -d mcvg_config.filelist mcvg_config.filelist_part_
+seq -w 00 1 19 | while read i;do cat mcvg_config.filelist_part_$i | parallel -j 30 --colsep="\t" echo run_metabat2.sh {2} {3} bins_$i/{1}.mtb2.mcvg ;done > run.sh
+seq -w 00 1 19 | while read i;do ls -l bins_$i/* > bins_$i.list ;done
+# bins 保留大于500K的基因组
+cat bins*list | perl -lne '$_=~/mjx\s+(\d+)\s.*\s(\S+)/; $x=$1; next if $x/1024 < 500; $x=$2; @s=split/\//, $x; $s[-1]=~s/.fa//; @s2=split/\./, $s[-1]; print "$s2[0]\t$s[-1]\t/share/data1/mjx/proj/07.pigs_binning_mcvg_20230929/02.bin_s1/metabat2_mcvg/$x"' > bins_m500k.filelist
+
+# single binning
+split -l 200 -d single_config.filelist single_config.filelist_part_
+seq -w 00 1 19 | while read i;do mkdir bins_$i ;done
+seq -w 00 1 19 | while read i;do cat single_config.filelist_part_$i | parallel -j 30 --colsep="\t" echo run_metabat2.sh {2} {3} bins_$i/{1}.mtb2.single ;done > run.sh
+seq -w 00 1 19 | while read i;do ls -l bins_$i/* > bins_$i.list ;done
+cat bins*list | perl -lne '$_=~/mjx\s+(\d+)\s.*\s(\S+)/; $x=$1; next if $x/1024 < 500; $x=$2; @s=split/\//, $x; $s[-1]=~s/.fa//; @s2=split/\./, $s[-1]; print "$s2[0]\t$s[-1]\t/share/data1/mjx/proj/07.pigs_binning_mcvg_20230929/02.bin_s1/metabat2_single/$x"' > bins_m500k.filelist
+
+# semibin
+split -l 200 -d single_config.filelist single_config.filelist_part_
+seq -w 00 1 19 | while read i;do mkdir bins_$i ;done
+seq -w 00 1 19 | while read i;do cat single_config.filelist_part_$i | parallel -j 30 --colsep="\t" echo run_semibin2.sh {2} {3} bins_$i/{1} ;done > run.sh
+seq -w 00 1 19 | while read i;do ls -l bins_$i/* > bins_$i.list ;done
+cat bins*list | perl -lne '$_=~/mjx\s+(\d+)\s.*\s(\S+)/; $x=$1; next if $x/1024 < 500; $x=$2; @s=split/\//, $x; $s[-1]=~s/.fa//; @s2=split/\./, $s[-1]; print "$s2[0]\t$s[-1]\t/share/data1/mjx/proj/07.pigs_binning_mcvg_20230929/02.bin_s1/semibin2_single/$x"' > bins_m500k.filelist
+
+# dRep
+cat samples_3997 | while read i;do grep -w $i metabat2_mcvg.filelist metabat2_single.filelist semibin2_single.filelist | cut -f3 > bins_samples/$i.filepath ;done
+cat bins_undRep.samples | while read i;do grep -w $i metabat2_mcvg.filelist metabat2_single.filelist semibin2_single.filelist | cut -f3 > bins_undRep/$i.filepath ;done
+find bins_samples/ -size '0' > unbinning.tsv 
+ls bins_samples/* | parallel -j 10 echo run_dereplicate.sh {} bins_dRep/{/.} > run.sh
+
+cat bins_dRep/*info.tsv | csvtk cut -t -f4,1,2 | awk '$1!="genome"' > bins_final.len
+```
+
+## 03.mash_s2
+```{sh}
+le pigs_gut_metagenome_2133_file_list | parallel -j 2 --colsep="\t" seqkit seq -g -m 1500 -o contigs/{2}.m1500.fa {3}
+find /share/data1/mjx/proj/07.pigs_binning_mcvg_20230929/03.mash_s2/contigs -size "+1M" | filelist > contigs_2121.filelist
+#cat contigs_2121.filelist | parallel -j 2 --colsep="\t" seqkit seq -g -m 5000 {2} \| seqkit replace -p \" \.\*\" -r \"\" \| seqkit replace -p \"\^\" -r \"{1}\|\" -o contigs_m5k/{1}.m5k.fa
+#cat contigs_m5k/* | seqkit split2 --by-part 25 --by-part-prefix contigs_m5k_split/contigs.m5k.part_ -O contigs_m5k_split
+cat pigs_gut_metagenome_2133_file_list | csvtk join -H -t -f '2;1' - contigs_2121.filelist | csvtk cut -t -H -f 1,2,5,4 > samples_2121.filelist
+
+mash sketch -s 100000 -k 32 -p 32 -l contigs_2121.filepath -o contigs_2121.msh
+cat contigs_2121.filelist | parallel -j 10 --colsep="\t" mash dist contigs_2121.msh {2} \| sort -nk3 \> dist_sort/{1}.dist
+```
+
+## 04.depth_s2
+```{sh}
+cut -f1 ../03.mash_s2/contigs_2121.filelist > samples_2121
+split -d -l 1000 samples_2121 samples_2121.part_
+
+cat samples_2121.part_00 | parallel -j 5 run_mapping.sh {} depth_00
+cat samples_2121.part_01 | parallel -j 5 run_mapping.sh {} depth_01
+cat samples_2121.part_02 | parallel -j 5 run_mapping.sh {} depth_02
+
+# 提取 m1500 contig的丰度
+perl -e '%h;open I, "samples_2121.filelist";while(<I>){chomp;@s=split/\t/;$h{$s[1]}=$s[2]} while(<>){chomp;@s=split/_/;print"$s[0]\t$_\t$h{$s[0]}\n"}' depth_00.filelist > filelist.00
+perl -e '%h;open I, "samples_2121.filelist";while(<I>){chomp;@s=split/\t/;$h{$s[1]}=$s[2]} while(<>){chomp;@s=split/_/;print"$s[0]\t$_\t$h{$s[0]}\n"}' depth_01.filelist > filelist.01
+perl -e '%h;open I, "samples_2121.filelist";while(<I>){chomp;@s=split/\t/;$h{$s[1]}=$s[2]} while(<>){chomp;@s=split/_/;print"$s[0]\t$_\t$h{$s[0]}\n"}' depth_02.filelist > filelist.02
+cat filelist.00 | parallel -j 5 --colsep="\t" -q perl -e '%h; open I, "$ARGV[0]"; $head=<I>; while(<I>){chomp;@s=split/\t/;$h{$s[0]}=$_}; open I, "$ARGV[1]"; open O, ">$ARGV[2]"; print O $head; while(<I>){chomp;if(/>(\S+)/){print O "$h{$1}\n"} } close O' {3} {4} ../depth_00/{2}.depth
+cat filelist.01 | parallel -j 5 --colsep="\t" -q perl -e '%h; open I, "$ARGV[0]"; $head=<I>; while(<I>){chomp;@s=split/\t/;$h{$s[0]}=$_}; open I, "$ARGV[1]"; open O, ">$ARGV[2]"; print O $head; while(<I>){chomp;if(/>(\S+)/){print O "$h{$1}\n"} } close O' {3} {4} ../depth_01/{2}.depth
+cat filelist.02 | parallel -j 5 --colsep="\t" -q perl -e '%h; open I, "$ARGV[0]"; $head=<I>; while(<I>){chomp;@s=split/\t/;$h{$s[0]}=$_}; open I, "$ARGV[1]"; open O, ">$ARGV[2]"; print O $head; while(<I>){chomp;if(/>(\S+)/){print O "$h{$1}\n"} } close O' {3} {4} ../depth_02/{2}.depth 
+
+# 合并depth
+for i in 00 01 02;do realpath depth_$i/*depth | filelist > depth_$i.filelist ;done
+for i in 00 01 02;do cat samples_2121.part_$i | parallel -j 2 run_depth_combine.pl depth_$i.filelist {} 15 depth_combine/{} ;done
+
+realpath depth_combine/*depth | filelist > depth_combine.filelist
+cut -f2,3 ../03.mash_s2/samples_2121.filelist | csvtk join -H -t -f 1 - depth_combine.filelist > mcvg_config.filelist
+
+cat depth_*filelist | perl -lne '@s=split;@s2=split/_/, $s[0];print "$s2[0]\t$s[1]" if $s2[0] eq $s2[1]' > depth_single.filelist
+cut -f2,3 ../03.mash_s2/samples_2121.filelist | csvtk join -H -t -f 1 - depth_single.filelist > single_config.filelist
+```
+
+## 05.bin_s2
+```{sh}
+# mcvg binning
+split -l 200 -d mcvg_config.filelist mcvg_config.filelist_part_
+seq -w 00 1 10 | while read i;do cat mcvg_config.filelist_part_$i | parallel -j 30 --colsep="\t" echo run_metabat2.sh {2} {3} bins_$i/{1}.mtb2.mcvg ;done > run.sh
+seq -w 00 1 10 | while read i;do ls -l bins_$i/* > bins_$i.list ;done
+# bins 保留大于500K的基因组
+cat bins*list | perl -lne '$_=~/mjx\s+(\d+)\s.*\s(\S+)/; $x=$1; next if $x/1024 < 500; $x=$2; @s=split/\//, $x; $s[-1]=~s/.fa//; @s2=split/\./, $s[-1]; print "$s2[0]\t$s[-1]\t/share/data1/mjx/proj/07.pigs_binning_mcvg_20230929/05.bin_s2/metabat2_mcvg/$x"' > bins_m500k.filelist
+
+# single binning
+split -l 200 -d single_config.filelist single_config.filelist_part_
+seq -w 00 1 10 | while read i;do mkdir bins_$i ;done
+seq -w 00 1 10 | while read i;do cat single_config.filelist_part_$i | parallel -j 30 --colsep="\t" echo run_metabat2.sh {2} {3} bins_$i/{1}.mtb2.single ;done > run.sh
+seq -w 00 1 10 | while read i;do ls -l bins_$i/* > bins_$i.list ;done
+cat bins*list | perl -lne '$_=~/mjx\s+(\d+)\s.*\s(\S+)/; $x=$1; next if $x/1024 < 500; $x=$2; @s=split/\//, $x; $s[-1]=~s/.fa//; @s2=split/\./, $s[-1]; print "$s2[0]\t$s[-1]\t/share/data1/mjx/proj/07.pigs_binning_mcvg_20230929/05.bin_s2/metabat2_single/$x"' > bins_m500k.filelist
+
+# semibin
+split -l 200 -d single_config.filelist single_config.filelist_part_
+seq -w 00 1 10 | while read i;do mkdir bins_$i ;done
+seq -w 00 1 10 | while read i;do cat single_config.filelist_part_$i | parallel -j 30 --colsep="\t" echo run_semibin2.sh {2} {3} bins_$i/{1} ;done > run.sh
+seq -w 00 1 10 | while read i;do ls -l bins_$i/* > bins_$i.list ;done
+cat bins*list | perl -lne '$_=~/mjx\s+(\d+)\s.*\s(\S+)/; $x=$1; next if $x/1024 < 500; $x=$2; @s=split/\//, $x; $s[-1]=~s/.fa//; @s2=split/\./, $s[-1]; print "$s2[0]\t$s[-1]\t/share/data1/mjx/proj/07.pigs_binning_mcvg_20230929/05.bin_s2/semibin2_single/$x"' > bins_m500k.filelist
+
+# dRep
+cat samples_2121 | while read i;do grep -w $i metabat2_mcvg.filelist metabat2_single.filelist semibin2_single.filelist | cut -f3 > bins_samples/$i.filepath ;done
+find bins_samples/ -size '0' > unbinning.tsv 
+ls bins_samples/* | parallel -j 10 echo run_dereplicate.sh {} bins_dRep/{/.} > run.sh
+
+cat bins_dRep/*info.tsv | csvtk cut -t -f4,1,2 | awk '$1!="genome"' > bins_final.len
+```
+
+## 06.ckm2
+```{sh}
+cat ../../02.bin_s1/dRep/bins_final.len ../../05.bin_s2/dRep/bins_final.len > bins.len
+cat ../../02.bin_s1/dRep/bins_final.filepath ../../05.bin_s2/dRep/bins_final.filepath > bins.filepath
+split -d -l 50000 bins.filepath bins.filepath.
+seq -w 0 1 14 | while read i;do mkdir bins_$i;done
+seq -w 0 1 14 | while read i;do cat bins.filepath.00 | parallel -j 30 ln -s {} bins_$i;done &
+
+# checkm2
+#seq -w 0 1 14 | while read i;do checkm2 predict --input bins/bins_$i --output-directory ckm2_$i --tmpdir /share/data1/mjx/tmp/tmp_ckm2 -x .fa --threads 120 --force;done
+cat ckm2_*/quality_report.tsv | awk 'NR==1 || $1!="Name"' > ckm2_quality_report.tsv
+
+# gunc
+#seq -w 0 1 14 | while read i;do gunc run -d ckm2_$i/protein_files/ -t 120 -g -e .faa -o gunc_$i/;done
+cat gunc_*/GUNC.progenomes_2.1.maxCSS_level.tsv | awk 'NR==1 || $1!="genome"' > gunc_progenomes.tsv
+
+# qc
+csvtk join --left-join -t -f 1 ckm2_quality_report.tsv gunc_progenomes.tsv | awk '{print $1"\t"$2"\t"$3"\t"$NF}' > total_bins.before_qc.tsv
+awk -F '\t' '$2>=70 && $3<=5 && ($2-$3*5)>55 && $4=="True"' total_bins.before_qc.tsv > total_bins.after_qc.tsv
+awk -F '\t' '$2>=90 && $3<=5 && $4=="True"' total_bins.before_qc.tsv > total_bins.high-quality.tsv
+
+csvtk join --left-join -H -t -f 1 total_bins.after_qc.tsv total_bins.filelist > total_bins.after_qc.filepath
+```
+
+## 07.isolate
+```{sh}
+datasets summary genome taxon --as-json-lines 2 > summary_bacteria.json 
+datasets summary genome taxon --as-json-lines 2157 > summary_archaea.json
+datasets summary genome taxon --as-json-lines 4751 > summary_fungi.json
+dataformat tsv genome --inputfile summary_archaea.json > summary_archaea.tsv
+dataformat tsv genome --inputfile summary_bacteria.json > summary_bacteria.tsv
+dataformat tsv genome --inputfile summary_fungi.json > summary_fungi.tsv
+
+grep -i 'pig\|scrofa\|swine\|boar\|porcine' summary_bacteria.json |\
+    grep -iv 'pigeon\|feed\|product\|Pigeonpea\|Fly\|rpig' |\
+    grep -i 'anal\|fece\|caec\|cace\|colon\|intestin\|gastrointestinal\|duodenum\|enteri\|faec\|fecal\|gastr\|gut\|ileum\|ileal\|jejunum\|rectal\|rectum\|stool\|stomach' |\
+    grep -iv 'binning\|metagenomic assembly' > summary_bacteria.json.f
+get_JsonAttributes.py summary_bacteria.json.f summary_bacteria.json.f.attr
+cut -f1 summary_bacteria.json.f.attr | perl -e '%h;while(<>){chomp;@s=split/_/;push @{$h{$s[1]}}, $s[0];}; for (keys %h){$x=join(",", @{$h{$_}}); if($x=~/,/){print "GCF_$_\n"}else{print "GCA_$_\n"}}' > summary_bacteria.json.f.attr.name
+perl -e '%h;open I, "summary_bacteria.json.f.attr.name";while(<I>){chomp;$h{$_}=0} while(<>){$_=~/^\{\"accession\"\:\"(\S+?)\"/;print "$_" if (exists $h{$1})}' summary_bacteria.json.f > summary_bacteria.json.f.attr.name.json
+dataformat tsv genome --fields accession,assminfo-assembly-method,assminfo-biosample-accession,assminfo-biosample-attribute-name,assminfo-biosample-attribute-value,assminfo-biosample-bioproject-accession,assminfo-biosample-collection-date,assminfo-biosample-description-organism-common-name,assminfo-biosample-description-organism-name,assminfo-biosample-description-organism-tax-id,assminfo-biosample-geo-loc-name,assminfo-biosample-isolation-source,assminfo-biosample-isolate,assminfo-biosample-host,assminfo-biosample-geo-loc-name,assminfo-biosample-package,assmstats-contig-n50,assmstats-genome-coverage,checkm-completeness,organism-name,organism-tax-id --inputfile summary_bacteria.json.f.attr.name.json > summary_bacteria.json.f.attr.name.tsv
+cat summary_bacteria.json.f.attr.name.tsv | perl -e '$head=<>;$head=~s/\n//; %h; %l; while(<>){chomp;@s=split/\t/; if($s[0] ne $x){$l{$s[0]}=$_;$x=$s[0]}; $h{$s[0]}->{$s[3]}=$s[4];} %name;for $i(keys %h){for $j(keys $h{$i}){$name{$j}++}}; @t=sort(keys %name); print "$head\t".join("\t", @t)."\n"; for $i(keys %h){print "$l{$i}\t"; @p=(); for $j(@t){if(exists $h{$i}{$j}){push @p, $h{$i}{$j} }else{push @p, "";} }; print join("\t", @p)."\n";}' > summary_bacteria.json.f.attr.name.tsv2
+
+datasets download genome accession --inputfile ncbi_accession.tsv --include genome --filename ncbi_accession.tsv.zip
+
+# checkm2
+checkm2 predict --input isolate --output-directory ckm2 --tmpdir /share/data1/mjx/tmp/tmp_ckm2 -x .fa --threads 120 --force
+cat ckm2/quality_report.tsv | awk 'NR==1 || $1!="Name"' > ckm2_quality_report.tsv
+
+# gunc
+gunc run -d ckm2/protein_files/ -t 120 -g -e .faa -o gunc
+cat gunc/GUNC.progenomes_2.1.maxCSS_level.tsv | awk 'NR==1 || $1!="genome"' > gunc_progenomes.tsv
+
+# qc
+csvtk join --left-join -t -f 1 ckm2_quality_report.tsv gunc_progenomes.tsv | awk '{print $1"\t"$2"\t"$3"\t"$NF}' > isolate.before_qc.tsv
+awk -F '\t' '$2>=70 && $3<=5 && ($2-$3*5)>55 && $4=="True"' isolate.before_qc.tsv > isolate.after_qc.tsv
+awk -F '\t' '$2>=90 && $3<=5 && $4=="True"' isolate.before_qc.tsv > isolate.high-quality.tsv
+
+csvtk join --left-join -H -t -f 1 isolate.after_qc.tsv isolate.filelist > isolate.after_qc.filepath
+```
+
+## 08.dRep
+```{sh}
+# 第一次聚类
+# mash
+cut -f5 total_genomes.after_qc.tsv | parallel -j 20 mash sketch {} -s 1000 -o mash_out/{/.}
+find mash_out/ -name "*msh" | parallel -k -j 2 --pipe -n 25000 "cat > mash.chunk.{#}.filepath"
+parallel -j 10 -k mash paste mash.chunk.{} -l mash.chunk.{}.filepath ::: {1..9}
+# dist
+parallel -j 10 mash dist -p 30 mash.chunk.{}.msh mash.chunk.{}.msh \> mash.chunk.{}.dist ::: {1..9}
+parallel -j 2 tools_mashANI_cluster.py -i mash.chunk.{}.dist -o mash.chunk.{}.dist.clu -ani 0.9 ::: {1..9}
+# skani
+seq 1 1 9 | while read i;do mkdir mash.chunk.$i.skani; done
+seq 1 1 9 | while read i;do perl -e 'open I, "$ARGV[0]"; while(<I>){chomp; next if /cluster/; @s=split/\s+/; if($s[1] ne $x){open O, ">$ARGV[1]/$s[1].filelist"; print O "$s[0]\n"; $x=$s[1] }else{ print O "$s[0]\n" } }' mash.chunk.$i.dist.clu mash.chunk.$i.skani ;done
+seq 1 1 9 | while read i;do perl -e 'open I, "ls $ARGV[0]/*filelist|"; while(<I>){chomp;$_=~/(\d+).filelist/; print "skani dist --ql $_ --rl $_ -o $ARGV[0]/$1.skani --min-af 30 -t 20\n"}' mash.chunk.$i.skani ;done > run_skani.sh
+seq 1 1 9 | while read i;do perl -e 'open I, "ls $ARGV[0]/*skani|"; while(<I>){chomp;$_=~/\/(\d+).skani/; print "tools_skANI_cluster.py -i $_ -o $ARGV[0]/$1.clu -nc 0.3 -ani 0.95\n"}' mash.chunk.$i.skani ;done > run_clu.sh
+# extract clu info
+seq 1 1 9 | while read i;do ls mash.chunk.$i.skani/*clu | parallel -j 20 -q perl -e 'open I, "$ARGV[0]";$ARGV[0]=~/(\d+).clu/;$x=$1; readline(I);while(<I>){chomp;@s=split/\t/;print "$s[0]\t$x\t$s[1]\t$x\_$s[1]\n"}' {} | \
+    csvtk add-header -t -n "name,primary_cluster,second_cluster,final_cluster" > mash.chunk.$i.skani.Cdb.tsv ;done
+# filter
+parallel -j 10 parse_dRep.pl mash.chunk.{}.skani.Cdb.tsv total_genomes.after_qc.tsv mash.chunk.{}.skani.Cdb.info ::: `seq 1 1 9`
+
+# 第二次聚类
+cut -f3 *Cdb.info | sed 's/^/mash_out\//g;s/$/.msh/g' > sec.mash.filepath
+mash paste sec.mash -l sec.mash.filepath
+mash dist -p 50 sec.mash.msh sec.mash.msh > sec.mash.dist
+tools_mashANI_cluster.py -i sec.mash.dist -o sec.mash.dist.clu -ani .9
+perl -ne 'next if /cluster/;@s=split/\s+/;if($s[1] ne $x){open O, ">sec.mash.skani/$s[1].filelist"; print O "$s[0]\n"; $x=$s[1] }else{print O "$s[0]\n"}' sec.mash.dist.clu
+perl -e 'open I, "ls sec.mash.skani/*filelist|"; while(<I>){chomp;$_=~/(\d+).filelist/; print "skani dist --ql $_ --rl $_ -o sec.mash.skani/$1.skani --min-af 30 -t 20\n"}' | parallel -j 10
+perl -e 'open I, "ls sec.mash.skani/*skani|"; while(<I>){chomp;$_=~/\/(\d+).skani/; print "tools_skANI_cluster.py -i $_ -o sec.mash.skani/$1.clu -nc 0.3 -ani 0.95\n"}' | parallel -j 50
+ls sec.mash.skani/*clu | parallel -j 20 -q perl -e 'open I, "$ARGV[0]";$ARGV[0]=~/(\d+).clu/;$x=$1; readline(I);while(<I>){chomp;@s=split/\t/;print "$s[0]\t$x\t$s[1]\t$x\_$s[1]\n"}' {} | \
+    csvtk add-header -t -n "name,primary_cluster,second_cluster,final_cluster" > sec.mash.skani.Cdb.tsv
+parse_dRep.pl sec.mash.skani.Cdb.tsv total_genomes.after_qc.tsv sec.mash.skani.Cdb.info
+
+cat mash.chunk.*.skani.Cdb.info | perl -e '%clu;while(<>){chomp;@s=split/\t/;$clu{$s[2]}=$s[3]}; open I, "sec.mash.skani.Cdb.info"; while(<I>){chomp; @s=split/\t/; @s2=split/,/,$s[3]; %h=(); for (@s2){@x=split/,/,$clu{$_}; for (@x){$h{$_}++} }; @out=keys %h; $len=scalar @out;print "$s[0]\t$len\t$s[2]\t".join(",", @out)."\n"}' > final.clu.info
+```
+
+## 09.taxa
+```{sh}
+cat xx2 | perl -e '$x=1;while(<>){chomp;printf("PIG_GENOME%04s\t", $x);print "$_\n";$x+=1}' > kraken_build.genome.metadata
+kraken_build.py -l kraken_build.genome.filelist.tsv -t kraken_build.genome.taxonomy.tsv -d kraken2db_150mers -p 30 -m 150
+kraken_build.py -l kraken_build.genome.filelist.tsv -t kraken_build.genome.taxonomy.tsv -d kraken2db_100mers -p 30 -m 100
+```
+
+## 10.geneset
+```{sh}
+cut -f1,5 ../08.dRep/total_genomes.after_qc.tsv | split -d -l 30000 - total_genomes.filelist.chunk_
+cut -f2 total_genomes.filelist.chunk_01 | perl -e 'while(<>){chomp;open I, "$_"; $_=~/.*\/(\S+).fa/;$n=$1;while(<I>){chomp;if(/>(\S+)/){print ">$n\|$1\n"}else{print "$_\n"}}}' > total_genomes.filelist.chunk_01.fa
+# 基因预测，长度过滤，名称修改
+flow_prodigal.sh total_genomes.filelist.chunk_01.fa total_genomes.filelist.chunk_01 100
+seqkit seq -g -m 100 total_genomes.filelist.chunk_01.ffn | seqkit replace -p "\s.*" -r "" -o total_genomes.filelist.chunk_01.ffn.f
+# 聚类
+mmseqs easy-cluster gene.ffn cluster . --cluster-mode 2 --cov-mode 1 --min-seq-id 0.95 -c 0.9 --kmer-per-seq-scale 0.8 --threads 112
+# 蛋白序列提取
+ls /share/data1/mjx/proj/04.black_pig_metagenome_20230529/10.geneset/prodigal/*faa > gene.faa.list
+perl -e 'while(<>){chomp; open I, "$_"; while(<I>){chomp;if(/^(\S+)/){print "$1\n"}else{print "$_\n"}}}' gene.faa.list > gene.faa
+# 最终
+cp mmseqs/cluster_rep_seq.fasta geneset.ffn
+seqkit fx2tab -n -l geneset.ffn -o geneset.len
+cut -f1 geneset.len > geneset.id
+seqkit grep -f geneset.id mmseqs/gene.faa -o geneset.faa
+
+# map
+minimap2 -I 100g -d geneset_full.mmi geneset_full/cluster_rep_seq.fasta
+cat samples.6574.filelist | parallel -j 6 --colsep="\t" run_minimap2.sh {2} geneset_full.mmi geneset_full_ab/{1}
+cut -f1 samples.6574.filelist | head -1500 | parallel -j 5 samtools coverage geneset_full_ab/{}.sort.bam \| awk \'\$4\!\=0\' \> geneset_full_ab/{}.cvg
+```
+
+## 12.euk
+```{sh}
+# bin大小大于5M认为是潜在的真核生物bin，进行busco初级分析
+cat ../../02.bin_s1/dRep/bins_final.len ../../05.bin_s2/dRep/bins_final.len > bins.len
+awk '$3>5000000' bins.len | sort -rnk3,3 | cut -f2 > bins.len.m5M.filepath
+
+cat total_bins.euk.list | parallel -j 20 --colsep="\t" busco -i {2} -c 4 -o busco_out/{1} -m geno -l /share/data1/database/busco_v5/busco_downloads/lineages/fungi_odb10/ --offline
+ls */*txt | perl -ne 'chomp;$_=~/odb10.(\S+).txt/;$x=$1;open I, "$_"; while (<I>) {if(/\s+C:(\S+?)%(\S+)/){print "$x\t$1\t$_"}}' | sort -rnk2 > ../busco_out.tsv
+```
+
+## 13.BGC
+```{sh}
+cat 13.BGC/r1.sh 
+# 对基因组进行BGCs预测
+seqkit split -p 100 chunk_00.m5000.fa -O chunk_00
+ls *fa | parallel -j 20 antismash -c 6 --output-dir {.}.BGC_out --genefinding-tool prodigal --allow-long-headers {}
+ls -d *out | sed 's/.BGC_out//' | parallel -j 40 parse_antismash.py {}.BGC_out/index.html {}.tsv
+ls chunk_*/*tsv | perl -ne 'chomp;$x=$_;$x=~s/.tsv//;open I, "<$_";while(<I>){chomp;if(!/contigs/){print "$x\t$_\n"}}' > total_BGCs_find.tsv
+
+# 如果BGCs所在的contigs小于5K，则过滤；和MIBIG比较
+find /share/data1/mjx/proj/07.pigs_binning_mcvg_20230929/13.BGC/ -name "*region*.gbk" > total_BGCs.filepath
+cat total_BGCs.filepath | filelist | perl -ne 'chomp; @s=split/\t/; open I, "$s[1]"; print "$_\t"; while(<I>){chomp;if(/LOCUS\s+(\S+)\s+(\S+)\s+bp/){print "$1\t$2\n"}}' | awk '$4>5000' > total_BGCs.info.filter
+bigscape -i total_BGCs.m5k.gbk -o total_BGCs.bigscape --pfam_dir /share/data1/database/pfam/release36/ -c 100 --mibig
+
+# To prevent sampling biases in quantitative analysis (taxonomic and functional compositions of GCCs/GCFs, GCF and GCC distances to reference databases as well as GCF 
+# metagenomic abundances), the 73,864 BGCs were further dereplicated by retaining only the longest BGC per GCF per species, resulting in a total of 30,182 BGCs.
+# 确定新颖性
+bigslice --query BGCs.gbk.m5k.rep --query_name jinxmeng_run0006 --n_ranks 3 /share/data1/database/bigslice/full_run_result/ --run_id 0006
+extract_data_from_bigscape.py -i /share/data1/database/bigslice/full_run_result/reports/1/data.db -tn bgc -o bigslice.out.bgc
+extract_data_from_bigscape.py -i /share/data1/database/bigslice/full_run_result/reports/1/data.db -tn gcf_membership -o bigslice.out.gcf_membership
+csvtk join --left-join -t -f "2;1" bigslice.out.gcf_membership bigslice.out.bgc > bigslice.out.metadata
+le bigslice.out.metadata | perl -e '%h;while(<>){chomp;next if /gcf_id/;@s=split/\t/;$h{$s[1]}{$s[2]}=$_;} for (keys %h){@x=sort keys %{$h{$_}};print "$h{$_}{$x[-1]}\n"}' | awk '$3>900' > bigslice.out.metadata.d_m900
+
+# 聚类分析
+# cat BGCs.gbk.m5k.rep.list | perl -lne '$_=~/(\S+?)\.re/;print "mkdir -p bigslice.in/dataset_1/$1"' | sort -u | parallel -j 30
+# cat BGCs.gbk.m5k.rep.list | perl -lne '$_=~/(\S+?)\.re/;print "cp BGCs.gbk.m5k/$_\.gbk bigslice.in/dataset_1/$1/"' | parallel -j 30
+# for i in *.gbk; do sed -i 's/Version      :: False/Version      :: 6.1.1/' $i; done # 修改MIBiG数据库的格式，才能被bigslice读入，进行聚类分析
+# bigslice -i bigslice.in bigslice.out # 聚类分析
+# bash bigslice.out/start_server.sh 33001
+
+# 定量
+cat BGCs.gbk.m5k.rep.filepath | parallel -j 60 extract_biosynthetic_cds.py {} {.}.fa &
+cat BGCs.gbk.m5k.rep/*fa | seqkit replace -p ".*\/" -r "" > BGCs.gbk.m5k.rep.biosyn.fa
+minimap2 -d BGCs.gbk.m5k.rep.biosyn.mmi BGCs.gbk.m5k.rep.biosyn.fa
+cat ../clean_fq_list | parallel -j 8 --colsep="\t" run_minimap2.sh {2} {3} BGCs.gbk.m5k.rep.biosyn.mmi profile/{1} &
+cat ../17.public_wp/CNP0000824.fq.list | parallel -j 8 --colsep="\t" run_minimap2.sh {2} {3} BGCs.gbk.m5k.rep.biosyn.mmi profile/{1} &
+le clean_fq.list | parallel -j 5 --colsep="\t" samtools coverage -d 0 -o profile/{1}.cvg profile/{1}.sort.bam
+combine_file_zy_folder_allsample.py -D profile/ -suffix .cvg -o profile.rc -t 1 -n 1 -v 4
+combine_file_zy_folder_allsample.py -D profile/ -suffix .cvg -o profile.cvg -t 1 -n 1 -v 6
+profile_filter_by_cvg.py profile.rc profile.cvg 50 profile.rc2
+profile_filter.py profile.rc2 profile.rc3
+
+# seqkit fx2tab -n -l BGCs.gbk.m5k.rep.biosyn.fa -o BGCs.gbk.m5k.rep.biosyn.len
+# profile_rc2tpm.pl profile.rc3 BGCs.gbk.m5k.rep.biosyn.len profile.rc3.tpm
+
+# perl -ne 'chomp;print "$_" if /name/;$_=~/\|(.*)$/;print "$1\n"' PULs.filter.rc > PULs.filter.rc2
+profile_summary_by_group.py PULs.rc.filter PULs.summary.rc
+```
+
+## 14.KEGG
+```{sh}
+# gene2KO
+diamond blastp -d /share/data1/database/KEGG/KEGG20230401.dmnd --outfmt 6 --min-score 60 --query-cover 50 --max-target-seqs 10 -p 112 -q ../10.geneset/cluster_rep_seq.faa -o kegg.btp >/dev/null 2>&1
+perl -ne 'chomp;@s=split/\t/;if($s[0] ne $a){$s[1]=~/\|(.*)/;print "$s[0]\t$1\n";$a=$s[0]}' kegg.btp > kegg.tsv
+
+# tpm
+cat geneset.cvg.filelist | parallel -j 10 --colsep="\t" calcu_tpm_for_KO.py kegg.tsv {2} KO_profile/{1}.tpm
+combine_file_zy_folder_allsample.py -D KO_profile/ -suffix .tpm -o kegg.tpm
+kegg_convert_levels.py -i kegg.tpm -mode pathway -o kegg.tpm
+```
+
+## 15.CAZy
+```{sh}
+diamond blastp -d /share/data1/database/run_dbcan4/db_20240122/CAZy.dmnd --outfmt 6 --min-score 60 --query-cover 50 --max-target-seqs 5 -p 32 -q ../10.geneset/cluster_rep_seq.faa -o CAZyme.btp > /dev/null 2>/dev/null
+parse_CAZy_blast_for_geneset.pl CAZyme.btp CAZyme
+
+# tpm
+cat geneset.cvg.filelist | parallel -j 15 --colsep="\t" calcu_tpm_for_KO.py CAZyme.tsv {2} CAZyme_profile/{1}.tpm
+combine_file_zy_folder_allsample.py -D CAZyme_profile -suffix .tpm -o CAZyme.tpm
+
+# strain genomes cgc pul substrate prediction
+cat ../06.taxa/final_strains.list | parallel -j 10 run_dbcan {} meta --tools diamond -c cluster --cgc_substrate --out_dir dbcan4.out/{/.} --dia_cpu 10 --hmm_cpu 10 --tf_cpu 10 --stp_cpu 10 --db_dir /share/data1/database/run_dbcan4/db_20240122/
+cut -f2 ../06.taxa/add_genome/fa.filepath | parallel -j 8 run_dbcan {} meta --tools diamond -c cluster --cgc_substrate --out_dir dbcan4.out/{/.} --dia_cpu 10 --hmm_cpu 10 --tf_cpu 10 --stp_cpu 10 --db_dir /share/data1/database/run_dbcan4/db_20240122/
+
+# CAZyme
+le total_genomes.name | parallel -j 30 cut -f1,5 dbcan4.out/{}/overview.txt \| sed \'1d\' \>  dbcan4.CAZyme.count/{}.CAZyme.out &
+ls * | parallel -j 20 -q perl -e 'open I, "$ARGV[0]";open O, ">$ARGV[1]";%h;while(<I>){chomp;@s=split/\t/;@s2=split/\+/, $s[1];$len=$#s2+1; for(@s2){$_=~s/_.*//g;$h{$_}+=1/$len}} for (keys %h){print O "$_\t$h{$_}\n"}' {} {}2 
+combine_file_zy_folder_allsample.py -D dbcan4.CAZyme.count -o dbcan4.CAZyme.count.profile -suffix .CAZyme.out2
+```
+
+## 16.MGC
+```{sh}
+# split fasta
+pigz -dc total_genomes.filelist.chunk_00.fa.gz | seqkit split -p 100 -O chunk_00
+
+# calling mgc
+ls *fa | parallel -j 20 run_gutsmash.py -c 6 --output-dir {.}.MGC_out --genefinding-tool prodigal {} &
+ls -d *out | sed 's/.MGC_out//' | parallel -j 40 parse_gutsmash.py {}.MGC_out/index.html {}.tsv
+
+cat chunk_0*/*tsv | awk 'NR==1 || $1!="contig"' > total_MGC.tsv
+
+# 汇总gbk，该名称
+ls -d *out | while read i;do ls $i/c*region*gbk | perl -ne 'chomp;$_=~/\/(c.*)...(region\d+).gbk/;print "$_\t$1\t$2\n"' > $i.filelist; done
+ls -d *out | sed 's/.MGC_out//' | while read i; do sed 1d $i.tsv | perl -ne 'chomp;$_=~/^(.*?)\..*name was\: (.*?)\)/; $y=$1; $x=$2; $x=~s/\|/_/;print "$y\t$x\n"' | csvtk join --left-join -H -t -f "1;2" - $i.MGC_out.filelist | sort -u | parallel -j 10 --colsep="\t" echo cp {3} gbk/{2}.{4}.gbk | sh ;done
+
+```
+
+## 17.vir_ident
+```{sh}
+cat contigs.name | parallel -j 2 run_virFinder.sh {}.fa 5000 {} &
+cat contigs.name | sed 1,2d | parallel -j 2 run_virFinder.sh {}.fa 5000 {} &
+```
+
+## 22.dRep_HQ
+```{sh}
+cut -f5 genome_HQ | parallel -j 20 mash sketch {} -s 1000 -o mash_out/{/.}
+find mash_out/ -name "*msh" | parallel -k -j 2 --pipe -n 10000 "cat > mash.chunk.{#}.filepath"
+parallel -j 10 -k mash paste mash.chunk.{} -l mash.chunk.{}.filepath ::: {1..8}
+# dist
+parallel -j 10 mash dist -p 30 mash.chunk.{}.msh mash.chunk.{}.msh \> mash.chunk.{}.dist ::: {1..8}
+parallel -j 2 tools_mashANI_cluster.py -i mash.chunk.{}.dist -o mash.chunk.{}.dist.clu -ani 0.9 ::: {1..8}
+# skani
+seq 1 1 8 | while read i;do mkdir mash.chunk.$i.skani; done
+seq 1 1 8 | while read i;do perl -e 'open I, "$ARGV[0]"; while(<I>){chomp; next if /cluster/; @s=split/\s+/; if($s[1] ne $x){open O, ">$ARGV[1]/$s[1].filelist"; print O "$s[0]\n"; $x=$s[1] }else{ print O "$s[0]\n" } }' mash.chunk.$i.dist.clu mash.chunk.$i.skani ;done
+seq 1 1 8 | while read i;do perl -e 'open I, "ls $ARGV[0]/*filelist|"; while(<I>){chomp;$_=~/(\d+).filelist/; print "skani dist --ql $_ --rl $_ -o $ARGV[0]/$1.skani --min-af 30 -t 20\n"}' mash.chunk.$i.skani ;done > run_skani.sh
+seq 1 1 8 | while read i;do perl -e 'open I, "ls $ARGV[0]/*skani|"; while(<I>){chomp;$_=~/\/(\d+).skani/; print "tools_skANI_cluster.py -i $_ -o $ARGV[0]/$1.clu -nc 0.3 -ani 0.95\n"}' mash.chunk.$i.skani ;done > run_clu.sh
+# extract clu info
+seq 1 1 8 | while read i;do ls mash.chunk.$i.skani/*clu | parallel -j 20 -q perl -e 'open I, "$ARGV[0]";$ARGV[0]=~/(\d+).clu/;$x=$1; readline(I);while(<I>){chomp;@s=split/\t/;print "$s[0]\t$x\t$s[1]\t$x\_$s[1]\n"}' {} | \
+        csvtk add-header -t -n "name,primary_cluster,second_cluster,final_cluster" > mash.chunk.$i.skani.Cdb.tsv ;done
+# filter
+parallel -j 10 ./parse_dRep.pl mash.chunk.{}.skani.Cdb.tsv ../08.dRep/total_genomes.after_qc.tsv mash.chunk.{}.skani.Cdb.info ::: `seq 1 1 8`
+
+# 第二次聚类
+cut -f3 *Cdb.info | sed 's/^/mash_out\//g;s/$/.msh/g' > sec.mash.filepath
+mash paste sec.mash -l sec.mash.filepath
+mash dist -p 50 sec.mash.msh sec.mash.msh > sec.mash.dist
+tools_mashANI_cluster.py -i sec.mash.dist -o sec.mash.dist.clu -ani .9
+perl -ne 'next if /cluster/;@s=split/\s+/;if($s[1] ne $x){open O, ">sec.mash.skani/$s[1].filelist"; print O "$s[0]\n"; $x=$s[1] }else{print O "$s[0]\n"}' sec.mash.dist.clu
+perl -e 'open I, "ls sec.mash.skani/*filelist|"; while(<I>){chomp;$_=~/(\d+).filelist/; print "skani dist --ql $_ --rl $_ -o sec.mash.skani/$1.skani --min-af 30 -t 20\n"}' | parallel -j 10
+perl -e 'open I, "ls sec.mash.skani/*skani|"; while(<I>){chomp;$_=~/\/(\d+).skani/; print "tools_skANI_cluster.py -i $_ -o sec.mash.skani/$1.clu -nc 0.3 -ani 0.95\n"}' | parallel -j 50
+ls sec.mash.skani/*clu | parallel -j 20 -q perl -e 'open I, "$ARGV[0]";$ARGV[0]=~/(\d+).clu/;$x=$1; readline(I);while(<I>){chomp;@s=split/\t/;print "$s[0]\t$x\t$s[1]\t$x\_$s[1]\n"}' {} | \
+        csvtk add-header -t -n "name,primary_cluster,second_cluster,final_cluster" > sec.mash.skani.Cdb.tsv
+parse_dRep.pl sec.mash.skani.Cdb.tsv ../08.dRep/total_genomes.after_qc.tsv sec.mash.skani.Cdb.info
+
+cat mash.chunk.*.skani.Cdb.info | perl -e '%clu;while(<>){chomp;@s=split/\t/;$clu{$s[2]}=$s[3]}; open I, "sec.mash.skani.Cdb.info"; while(<I>){chomp; @s=split/\t/; @s2=split/,/,$s[3]; %h=(); for (@s2){@x=split/,/,$clu{$_}; for (@x){$h{$_}++} }; @out=keys %h; $len=scalar @out;print "$s[0]\t$len\t$s[2]\t".join(",", @out)."\n"}' > final.clu.info
+```
+
+## 23.gtdbtk_HQ
+```{sh}
+cat species.rename | parallel -j 4 --colsep="\t" seqkit replace -p \".\*\" -r \"{1}_\{nr\}\" {2} -o species_fna/{1}.fna.gz
+kraken_build.py -l kraken_build.filelist.tsv -t kraken_build.taxonomy.tsv -d kraken2db_150mers -p 30 -m 150
+kraken_build.py -l kraken_build.filelist.tsv -t kraken_build.taxonomy.tsv -d kraken2db_125mers -p 30 -m 125
+kraken_build.py -l kraken_build.filelist.tsv -t kraken_build.taxonomy.tsv -d kraken2db_100mers -p 30 -m 100
+kraken_build.py -l kraken_build.filelist.tsv -t kraken_build.taxonomy.tsv -d kraken2db_75mers -p 30 -m 75
+```
+
+## 24.profile_HQ
+```{sh}
+ls kraken2/*log | perl -ne 'chomp;open I, "$_"; /\/(\S+).log/;$x=$1; while(<I>){chomp;print "$x\t$1\t$2\t" if /^(\d+) sequences \((.*) Mbp\)/;; print "$1 ($2)\t" if /  (\d+) sequences classified \((.*)\)/; print "$1 ($2)\n" if /  (\d+) sequences unclassified \((.*)\)/;}' | csvtk add-header -t -n sample,total_reads,total_bases,classified_reads,unclassified_reads > kraken2.seqs.stats.tsv
+
+# new est count
+combine_file_zy_folder_allsample.py -D kraken2/ -suffix .bk_out.p -o est_rc.p.profile -n 1 -v 6 -t 1 -s 0
+combine_file_zy_folder_allsample.py -D kraken2/ -suffix .bk_out.f -o est_rc.f.profile -n 1 -v 6 -t 1 -s 0
+combine_file_zy_folder_allsample.py -D kraken2/ -suffix .bk_out.g -o est_rc.g.profile -n 1 -v 6 -t 1 -s 0
+combine_file_zy_folder_allsample.py -D kraken2/ -suffix .bk_out.s -o est_rc.s.profile -n 1 -v 6 -t 1 -s 0 
+combine_file_zy_folder_allsample.py -D kraken2/ -suffix .bk_out.t -o est_rc.t.profile -n 1 -v 6 -t 1 -s 0
+```
+
+## 25.phylophlan
+```{sh}
+phylophlan_write_config_file -d a -o config_file --db_aa diamond --map_aa diamond --msa mafft --trim trimal --tree1 iqtree --tree2 raxml
+phylophlan -i ../23.gtdbtk_HQ/species_faa -t a -d phylophlan --databases_folder /share/data1/database/phylophlan3/ -f config_file --diversity high --verbose --fast -o . --nproc 30 > log 2>&1
+
+ls * | parallel -j 10 -q perl -e 'open I, "$ARGV[0]";$g=$ARGV[1]; open O, ">$ARGV[2]"; while(<I>){chomp;if(/>(\S+)/){print O ">$g.$1\n"}else{print O "$_\n"}}' {} {/.} /share/data1/software/phylophlan/input/mjx_bp_family.rep_20240529/{}
+sed '1d' dat.family.rep.genome.list | parallel -j 10 --colsep="\t" ln -s /share/data1/mjx/proj/04.black_pig_metagenome_20230529/07.annotation/faa/{2}.faa faa/{1}.faa
+phylophlan_write_config_file -d a -o cfg --db_aa diamond --map_aa diamond --msa mafft --trim trimal --tree1 fasttree
+# 每个diamond线程已经设置为4了，那么总线程数搞一个30就行了
+phylophlan -i faa -t a -d phylophlan --databases_folder /share/data1/database/phylophlan3/ -f cfg --diversity high --verbose --fast -o . --nproc 30 > log 2>&1 &
+
+ls *faa | parallel -j 10 -q perl -e 'open I, "$ARGV[0]"; open O, ">../genomospecies_4019_2/$ARGV[0]"; $x=$ARGV[1]; while(<I>){chomp;if(/>(\S+)/){print O ">$x.$1\n"}else{print O "$_\n"}}' {} {/.} &
+```
+
+## 26.ARG
+```{sh}
+diamond blastp -d /share/data1/database/SARG/SARG_v3.2_20220917.dmnd --outfmt 6 --query-cover 80 --id 80 --max-target-seqs 5 -p 80 -q ../10.geneset/geneset_full.faa -o ARGs.btp > /dev/null 2>/dev/null
+perl -ne 'chomp;@s=split/\t/;if($s[0] ne $a){print "$s[0]\t$s[1]\n" if $s[10]<1e-10;$a=$s[0]}' ARGs.btp > ARGs.tsv
+#perl -e 'open I, "ARGs.tsv"; %h; while(<I>){chomp; @s=split/\t/; $h{$s[0]}=$s[1]}; open I, "pigz -dc ../10.geneset/cluster_cluster.tsv.gz |"; while(<I>){chomp; @s=split/\t/; if(exists $h{$s[0]}){print "$_\t$h{$s[0]}\|$s[1]\n"} }' > all_ARG_gene.tsv
+#cut -f2 all_ARG_gene.tsv | seqkit grep -f - ../10.geneset/cluster_rep_seq.fasta -o all_ARG_gene.fa
+cut -f1 ARGs.tsv | seqkit grep -f - ../10.geneset/geneset_full.ffn > ARGs.fa
+```
+
+## 27.VFG
+```{sh}
+diamond blastp -d /share/data1/database/VFDB/VFDB_pro.dmnd --outfmt 6 --query-cover 80 --id 80 --max-target-seqs 5 -p 80 -q ../10.geneset/geneset_full.faa -o VFGs.btp > /dev/null 2>/dev/null
+perl -ne 'chomp;@s=split/\t/;if($s[0] ne $a){$s[1]=~/(VFG\d+)/;print "$s[0]\t$1\n" if $s[10]<1e-10;$a=$s[0]}' VFGs.btp > VFGs.tsv
+cut -f1 VFGs.tsv | seqkit grep -f - ../10.geneset/geneset_full.faa -o VFGs.fa
+```
+
+## 28.pN_pS
+```{sh}
+#bowtie2-build -q --large-index --threads 80 geneset_complete.ffn geneset_complete
+
+seqkit replace -p "^" -r "ARG|" ../26.ARG/ARGs.fa > gene.fa
+seqkit replace -p "^" -r "VFG|" ../27.VFG/VFGs.fa >> gene.fa
+seqkit replace -p "^" -r "MGE|" ../29.MGE/MGEs.fa >> gene.fa
+bowtie2-build gene.fa gene
+cut -f1,2 samples.6574.filelist | parallel -j 8 --colsep="\t" run_pnps_analyis.sh {2} gene gene.fa pnps/{1} 14
+```
+
+## 29.MGE
+```{sh}
+diamond blastp -d /share/data1/database/mobileOG/mobileOG.dmnd --outfmt 6 --query-cover 80 --id 80 --max-target-seqs 5 -p 110 -q ../10.geneset/geneset_full.faa -o MGEs.btp > /dev/null 2>/dev/null
+perl -ne 'chomp;@s=split/\t/;if($s[0] ne $a){print "$s[0]\t$s[1]\n" if $s[10] < 1e-10;$a=$s[0]}' MGEs.btp > MGEs.tsv
+cut -f1 MGEs.tsv | seqkit grep -f - ../10.geneset/geneset_full.ffn > MGEs.fa
+```
+
+## mcvg_test
+```{sh}
+shuf --random-source=<(yes 2024) contigs_3997.name | head -50 > contigs_3997.name.shuf
+
+# mapping
+cat contigs_3997.name.shuf | parallel -j 2 ./run_mapping.sh {} depth
+
+# combine depth
+cat contigs_3997.name.shuf | parallel -j 10 echo cp depth/{}_{}.depth depth_01
+cat contigs_3997.name.shuf | parallel -j 10 run_depth_combine.pl {} 5 depth_05/{} &
+cat contigs_3997.name.shuf | parallel -j 10 run_depth_combine.pl {} 10 depth_10/{} &
+cat contigs_3997.name.shuf | parallel -j 10 run_depth_combine.pl {} 15 depth_15/{} &
+cat contigs_3997.name.shuf | parallel -j 10 run_depth_combine.pl {} 20 depth_20/{} &
+cat contigs_3997.name.shuf | parallel -j 10 run_depth_combine.pl {} 25 depth_25/{} &
+cat contigs_3997.name.shuf | parallel -j 10 run_depth_combine.pl {} 30 depth_30/{} &
+cat contigs_3997.name.shuf | parallel -j 10 run_depth_combine.pl {} 40 depth_40/{} &
+cat contigs_3997.name.shuf | parallel -j 10 run_depth_combine.pl {} 50 depth_50/{} &
+
+# binning
+cat contigs_3997.name.shuf.filepath | parallel -j 8 --colsep="\t" metabat2 -t 20 -m 1500 -s 200000 --saveCls --unbinned --seed 2024 -i {3} -a depth_01/{2}.depth -o mcvg_01/{2}.bin
+cat contigs_3997.name.shuf.filepath | parallel -j 8 --colsep="\t" metabat2 -t 20 -m 1500 -s 200000 --saveCls --unbinned --seed 2024 -i {3} -a depth_05/{2}.depth -o mcvg_05/{2}.bin
+cat contigs_3997.name.shuf.filepath | parallel -j 8 --colsep="\t" metabat2 -t 20 -m 1500 -s 200000 --saveCls --unbinned --seed 2024 -i {3} -a depth_10/{2}.depth -o mcvg_10/{2}.bin
+cat contigs_3997.name.shuf.filepath | parallel -j 8 --colsep="\t" metabat2 -t 20 -m 1500 -s 200000 --saveCls --unbinned --seed 2024 -i {3} -a depth_15/{2}.depth -o mcvg_15/{2}.bin
+cat contigs_3997.name.shuf.filepath | parallel -j 8 --colsep="\t" metabat2 -t 20 -m 1500 -s 200000 --saveCls --unbinned --seed 2024 -i {3} -a depth_20/{2}.depth -o mcvg_20/{2}.bin
+cat contigs_3997.name.shuf.filepath | parallel -j 8 --colsep="\t" metabat2 -t 20 -m 1500 -s 200000 --saveCls --unbinned --seed 2024 -i {3} -a depth_25/{2}.depth -o mcvg_25/{2}.bin
+cat contigs_3997.name.shuf.filepath | parallel -j 8 --colsep="\t" metabat2 -t 20 -m 1500 -s 200000 --saveCls --unbinned --seed 2024 -i {3} -a depth_30/{2}.depth -o mcvg_30/{2}.bin
+cat contigs_3997.name.shuf.filepath | parallel -j 8 --colsep="\t" metabat2 -t 20 -m 1500 -s 200000 --saveCls --unbinned --seed 2024 -i {3} -a depth_40/{2}.depth -o mcvg_40/{2}.bin
+cat contigs_3997.name.shuf.filepath | parallel -j 8 --colsep="\t" metabat2 -t 20 -m 1500 -s 200000 --saveCls --unbinned --seed 2024 -i {3} -a depth_50/{2}.depth -o mcvg_50/{2}.bin
+mv mcvg_01/*.lowDepth.fa mcvg_01/*.tooShort.fa mcvg_01/*.unbinned.fa mcvg_01/*.bin mcvg_tmp_01/
+mv mcvg_05/*.lowDepth.fa mcvg_05/*.tooShort.fa mcvg_05/*.unbinned.fa mcvg_05/*.bin mcvg_tmp_05/
+mv mcvg_10/*.lowDepth.fa mcvg_10/*.tooShort.fa mcvg_10/*.unbinned.fa mcvg_10/*.bin mcvg_tmp_10/
+mv mcvg_15/*.lowDepth.fa mcvg_15/*.tooShort.fa mcvg_15/*.unbinned.fa mcvg_15/*.bin mcvg_tmp_15/
+mv mcvg_20/*.lowDepth.fa mcvg_20/*.tooShort.fa mcvg_20/*.unbinned.fa mcvg_20/*.bin mcvg_tmp_20/
+mv mcvg_25/*.lowDepth.fa mcvg_25/*.tooShort.fa mcvg_25/*.unbinned.fa mcvg_25/*.bin mcvg_tmp_25/
+mv mcvg_30/*.lowDepth.fa mcvg_30/*.tooShort.fa mcvg_30/*.unbinned.fa mcvg_30/*.bin mcvg_tmp_30/
+mv mcvg_40/*.lowDepth.fa mcvg_40/*.tooShort.fa mcvg_40/*.unbinned.fa mcvg_40/*.bin mcvg_tmp_40/
+mv mcvg_50/*.lowDepth.fa mcvg_50/*.tooShort.fa mcvg_50/*.unbinned.fa mcvg_50/*.bin mcvg_tmp_50/
+
+# ckm2
+for i in 01 05 10 15 20 25 30 40 50;do checkm2 predict --input mcvg_$i --output-directory ckm2_$i --tmpdir /share/data1/mjx/tmp/tmp_ckm2/ -x .fa --threads 112 --force;done
+for i in 01 05 10 15 20 25 30 40 50;do echo gunc run -d ckm2_$i/protein_files/ -t 112 -g -e .faa -o gunc_$i/;done
+parallel -j 2 dRep compare dRep_95_{} -g mcvg_{}/* -d -pa 0.9 -sa 0.95  -nc 0.30 -cm larger -p 50 --S_algorithm fastANI ::: 01 05 10 15 20 25 30 40 50 &
+for i in 01 05 10 15 20 25 30 40 50; do parse_dRep.pl -ckm2 ckm2_$i/quality_report.tsv dRep_95_$i/data_tables/Cdb.csv dRep_95_$i.result ;done &
+```
+
+## bash scripts
+```{bash}
+#### run_mapping.sh ####
+#!/usr/bin/bash
+
+( [ $# -ne 2 ] ) && { echo -e "Usage: $0 [sample_name] [out_directory]" && exit 2; }
+
+smps=$1; out=$2;
+
+/share/data1/mjx/proj/07.pigs_binning_mcvg_20230929/01.depth_s1/generate_mapping_cfg.pl $smps 15 |\
+    parallel -j 15 --colsep="\t" /share/data1/mjx/proj/07.pigs_binning_mcvg_20230929/01.depth_s1/run_minimap2.sh {4} {3} $out/{1}_{2}
+# out prefix: [ref]_[sample].depth
+
+#### run_minimap.sh ####
+#!/usr/bin/bash
+
+( [ $# -ne 3 ] ) &&  { echo -e "Usage: $0 [fq|fq1,fq2] [*.fa] [out_prefix]" && exit 2; }
+( [ -f $3.log ] ) && grep -q 'CMD: minimap2' $3.log && { echo -e "Skip sample: ${3##*/} .." && exit 0; } 
+
+if [[ $1 =~ "," ]];then
+    fq1=$(echo $1 | cut -d "," -f1)
+    fq2=$(echo $1 | cut -d "," -f2)
+    minimap2 --MD -t 16 -ax sr $2 $fq1 $fq2 2>$3.log |\
+        /share/data1/mjx/scripts/tools_get_depth_from_sam.single.py $3 > $3.depth
+else
+    minimap2 --MD -t 16 -ax sr $2 $1 2>$3.log |\
+        /share/data1/mjx/scripts/tools_get_depth_from_sam.single.py $3 > $3.depth
+fi
+
+#### run_kraken2.sh ####
+#!/usr/bin/bash
+shopt -s expand_aliases
+
+( [ $# -lt 3 ]) && { echo "Usage: $0 [fq|fq1,fq2] [kk2_db] [out_prefix] [read_len:-150]" && exit 2; }
+
+fq=$1; db=$2; out=$3; len=${4:-150}; trds=16
+alias kraken2=/share/data1/software/miniconda3/envs/kraken2/bin/kraken2
+alias bracken=/share/data1/software/miniconda3/envs/kraken2/bin/bracken
+
+( [ -f $out.log ] && grep -q 'Bracken complete' $out.log ) && \
+    echo -e "[$(date +%Y-%m-%d\ %H:%M:%S)] Skip sample: ${out##*/}." && exit 0
+
+if [[ $fq =~ "," ]];then
+    fq1=$(echo $fq | cut -d "," -f1)
+    fq2=$(echo $fq | cut -d "," -f2)
+    kraken2 --db $db --output $out.kk2_out --report $out.kk2_report --threads $trds --use-names --gzip-compressed $fq1 $fq2 >> $out.log 2>&1 && rm $out.kk2_out
+else
+    kraken2 --db $db --output $out.kk2_out --report $out.kk2_report --threads $trds --use-names --gzip-compressed $fq >> $out.log 2>&1 && rm $out.kk2_out
+fi
+
+bracken -l P -r $len -d $db -i $out.kk2_report -o $out.bk_out.p -w $out.bk_report.p >> $out.log 2>&1 && rm $out.bk_report.p
+bracken -l F -r $len -d $db -i $out.kk2_report -o $out.bk_out.f -w $out.bk_report.f >> $out.log 2>&1 && rm $out.bk_report.f
+bracken -l G -r $len -d $db -i $out.kk2_report -o $out.bk_out.g -w $out.bk_report.g >> $out.log 2>&1 && rm $out.bk_report.g
+bracken -l S -r $len -d $db -i $out.kk2_report -o $out.bk_out.s -w $out.bk_report.s >> $out.log 2>&1 && rm $out.bk_report.s
+bracken -l S1 -r $len -d $db -i $out.kk2_report -o $out.bk_out.t -w $out.bk_report.t >> $out.log 2>&1 && rm $out.bk_report.t
+
+#### cat run_bcftools.sh ####
+#!/usr/bin/bash
+
+( [ $# -lt 3 ] ) &&  { echo -e "Usage: $0 [sort.bam] [ref.fas] [out_prefix] [threads]" && exit 2; }
+trds=${4:-8}
+
+# snp calling, MAPQ > 20, baseQ > 30
+# snp filter, only SNP site, QUAL ≥ 30; sum of valid reads ≥ 10.
+bcftools mpileup --threads $trds -q 20 -Q 30 -f $2 $1 2>/dev/null |\
+    bcftools call --threads $trds -mv --ploidy 1 2>/dev/null |\
+    bcftools filter --threads $trds -e 'QUAL<30 || DP<10 || (INFO/DP4[0]+INFO/DP4[1]+INFO/DP4[2]+INFO/DP4[3]) < 10 || INDEL=1' -Oz -o $3.vcf.gz
+    
+```
+
+## perl scripts
+```{pl}
+#### generate_mapping_cfg.pl ####
+#!/usr/bin/perl
+# author: Jinxin Meng
+# created date: 2024-09-02, 20:48:19
+# modified date: 2024-09-02, 20:48:19
+
+use warnings;
+use strict;
+
+die "Usage: perl $0 [sample] [N]\n" unless @ARGV eq 2;
+my ($smps, $n) = @ARGV; 
+my $dist_dir = "/share/data1/mjx/proj/07.pigs_binning_mcvg_20230929/00.mash_s1/dist_sort";
+my $filepath = "/share/data1/mjx/proj/07.pigs_binning_mcvg_20230929/00.mash_s1/samples_3997.filelist";
+
+my $h;
+open I, "$filepath";
+while(<I>){
+    chomp;
+    my @s = split/\t/;
+    $h->{$s[1]}->{contigs} = $s[2];
+    $h->{$s[1]}->{fq} = $s[3];
+}
+open I, "$dist_dir/$smps.dist";
+my $x = 1;
+while(<I>){
+    chomp;
+    last if $x > $n;
+    $_ =~ /contigs\/(\S+?).m1500.*contigs\/(\S+?).m1500/;
+    my ($ref, $query) = ($2, $1);
+    my $contigs = $h->{$ref}->{contigs};
+    my $fq = $h->{$query}->{fq};
+    print "$ref\t$query\t$contigs\t$fq\n";
+    $x++;
+}
+
+#### run_depth_combine.pl ####
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+
+die "Usage: perl $0 [depth.filelist] [sample] [top_n] [out]\n" unless @ARGV eq 4;
+my ($dep, $smps, $n, $out) = @ARGV;
+
+my $h;
+open I, "$dep";
+while(<I>){
+    chomp;
+    my @s = split/\s/;
+    $h->{$s[0]} = $s[1];
+}
+
+open I, "/share/data1/mjx/proj/07.pigs_binning_mcvg_20230929/01.depth_s1/generate_mapping_cfg.pl $smps $n |";
+my @depth;
+my $contig;
+while(<I>){
+    chomp;
+    my @s = split /\t/;
+    $contig = $s[2] if $s[0] eq $s[1];
+    my $x = "$s[0]_$s[1]";
+    push @depth, $h->{$x};
+}
+
+my $cmd = "binning_depth_combine.pl $contig ".join(" ", @depth)." >$out.depth";
+system("$cmd");
+#### parse_dRep.pl ####
+#!/usr/bin/perl
+# Jinxin Meng, jinxmeng@zju.edu.cn
+# created date: 2023-10-02, 01:49:47
+# modified date: 2025-03-06, 08:32:39
+use warnings;
+use strict;
+use Getopt::Long;
+
+die "Usage: perl $0 [Cdb.tsv] [quality_report] [out_file]\n" unless @ARGV eq 3;
+
+my ($cdb, $qs, $out) = @ARGV;
+my (%clu, @name, %value) = (); 
+
+open I, "<$cdb";
+while (<I>) {
+    chomp;
+    next if /primary_cluster/;
+    my @s = split /\t/;
+    $s[0] =~ s/.(fa|fna)//;
+    $s[0] =~ s/.*\///;
+    push @{$clu{$s[3]}}, $s[0];
+    push @name, $s[0];
+}
+
+open I,"<$qs";
+while (<I>) {
+    chomp;
+    next if /Completeness/;
+    my @s = split /\t/;
+    $value{$s[0]} = $s[1] - 5 * $s[2] if (grep {$_ eq $s[0]} @name);
+}
+
+open O, ">$out";
+select_rep(\%clu, \%value); # 调用子程序并传递哈希的引用
+close O; 
+
+sub select_rep {
+    my ($clu, $value) = @_;  # 获取哈希的引用
+    my %clu = %{$clu};   # 将哈希引用解引用为哈希
+    my %value = %{$value};       # 将哈希引用解引用为哈希
+    for my $i (sort keys %clu) {
+        my $count = scalar @{$clu{$i}};
+        if ($count == 1) {
+            print O "clu.$i\t1\t@{$clu{$i}}\t@{$clu{$i}}\n";
+        } else {
+            my $max = -10000;
+            my $rep = "";
+            for my $j (@{$clu{$i}}) {
+                if ($value{$j} >= $max) {
+                    $max = $value{$j};
+                    $rep = $j;
+                }
+            }
+            print O "clu.$i\t$count\t$rep\t".join(",", @{$clu{$i}})."\n";
+        }   
+    }
+}
+#### parse_CAZy_blast_for_geneset.pl ####
+#!/usr/bin/perl
+# Jinxin Meng, jinxmeng@zju.edu.cn
+# created date: 2023-05-06, 12:01:05
+# modified date: 2025-08-24, 09:34:17
+use warnings;
+use strict;
+use POSIX;
+
+die "Usage: perl $0 [CAZymes blast for geneset] [out_prefix]\n" unless @ARGV eq 2;
+my ($in, $out) = @ARGV;
+my ($x, %all_CAZymes, %all_CAZyfams) = ("");
+
+open I, "<$in" or die "Can't open $in: $!\n";
+open O, ">${out}.tsv"; 
+while (<I>) {
+    chomp;
+    my @s = split /\s+/;
+    if ($x ne $s[0]) {
+        $_ =~ /(\S+?)\s\S+?\|(\S+?)\s/;
+        my ($gene, $CAZyme) = ($1, $2);
+        print O "$gene\t$CAZyme\n";
+        my @s = split/\|/, $CAZyme;
+        for my $i (@s) {
+            $i =~ s/_\S+//g;
+            $all_CAZymes{$i} += 1/($#s+1);
+        }
+    }
+    $x = $s[0];    
+}
+close O;
+
+open O, ">${out}.stat.tsv";
+for my $i (sort keys %all_CAZymes) { # count all CAZymes
+    my $n = int($all_CAZymes{$i}*1000)/1000;
+    print O "$i\t$n\n";
+    if ($i =~ /\S+\.\S+\.\S+/) {
+        $all_CAZyfams{"Other"} += $all_CAZymes{$i};
+    } else {
+        (my $x = $i) =~ s/\d+//g;
+        $all_CAZyfams{$x} += $all_CAZymes{$i};
+    }
+}
+close O;
+
+open O, ">${out}.fams.stat.tsv";
+for my $i (sort keys %all_CAZyfams) { # count all CAZyme families
+    my $n = int($all_CAZyfams{$i}*1000)/1000;
+    print O "$i\t$n\n";
+}
+close O;
+```
+
+## python scripts
+```{py}
+#### calcu_tpm_for_KO.py ####
+#!/share/data1/software/miniconda3/envs/jinxin/bin/python3
+# encoding: utf-8
+# author: Jinxin Meng
+# created date: 2024-03-12, 23:14:49
+# modified date: 2024-03-12, 23:14:49
+
+'''
+Jinxin Meng, 20240312
+Generate the TPM for each KO by summaring the gene abundance.
+Required files:
+1. KO annotation with field gene name and feature name with "\t" or "\s" delimited
+2. gene rc and len provided by samtools coverage [rname, startpos, endpos, numreads, covbases, coverage, meandepth, meanbaseq, meanmapq]
+'''
+
+import sys
+
+if len(sys.argv) != 4:
+    sys.exit("Usage: calcu_tpm_for_KO.py [in_f <gene ID|feature ID>] [cvg file generated from samtools coverage] [out_f]")
+
+def main(in_f, cvg, out_f):
+    KO = {}
+    with open(in_f, "r") as f:
+        for i in f:
+            l = i.strip().split()
+            KO[l[0]] = l[1]
+
+    total = 0
+    with open(cvg, "r") as f:
+        f.readline()
+        for i in f:
+            l = i.strip().split()
+            if int(l[3]) == 0:
+                continue
+            # if float(l[5]) < 10:
+            #    continue
+            total += int(l[3])/int(l[2])
+    
+    res = {}
+    with open(cvg, "r") as f:
+        f.readline()
+        for i in f:
+            l = i.strip().split()
+            if int(l[3]) == 0:
+                continue
+            # if float(l[5]) < 10:
+            #     continue
+            tpm = (int(l[3])/int(l[2])/total)*1000000
+            if l[0] not in KO:
+                continue
+            if KO[l[0]] not in res:
+                res[KO[l[0]]] = 0
+            res[KO[l[0]]] += tpm
+    out_f = open(out_f, "w")
+    for k, v in res.items():
+        out_f.write(k + "\t" + str(round(v, 4)) + "\n")
+
+if __name__ == "__main__":
+    main(sys.argv[1], sys.argv[2], sys.argv[3])
+
+#### get_profile_from_cluster.py ####
+#!/share/data1/software/miniconda3/envs/jinxin/bin/python3
+# encoding: utf-8
+# author: Jinxin Meng
+# created date: 2024-03-12, 11:55:10
+# modified date: 2024-03-12, 18:13:31
+
+'''
+Jinxin Meng, 20240312
+Generate the profile to determinethe presence or absence of KO in each sample.
+All genes in each gene cluster were regarded have same name annotation.
+Like KO, CAZyme, COGs ... annotation were used in this script.
+Example out:
+name    s1  s2  s3 ...
+K00001  1   4   2       
+K00002  2   1   1
+K00003  1   2   3
+...
+Required files:
+1. KO annotation with field gene name and KO name with "\t" or "\s" delimited
+2. gene cluster relationship provided by mmseqs
+'''
+
+import sys
+
+if len(sys.argv) != 4:
+    print("Usage: get_adjacency_for_samples.py [in_f <gene ID|name ID>] [gene_cluster.tsv <rep. gene ID|gene ID>] [out_f]")
+    print("  Reqired files:")
+    print("  1. in_f with field gene ID and feature ID, and gene ID with reg. exp. \"(.*?_\S+)\", such as s1_K141_100_1")
+    print("  2. gene_cluster.tsv with field representative gene ID and all gene ID ")
+    sys.exit()
+
+def main(in_f, cls_f, out_f):
+    name = {}
+    with open(in_f, "r") as f:
+        for i in f:
+            l = i.strip().split()
+            name[l[0]] = l[1]
+    
+    res = {}
+    sample = []
+    with open(cls_f, "r") as f:
+        for i in f:
+            l = i.strip().split()
+            if l[0] not in name:
+                continue
+            x = l[1].split("_")[0]
+            if name[l[0]] not in res:
+                res[name[l[0]]] = {}
+            if x not in res[name[l[0]]]:
+                res[name[l[0]]][x] = 0
+            if x not in sample:
+                sample.append(x)
+            res[name[l[0]]][x] += 1
+    
+    sample = sorted(sample)
+    out_f = open(out_f, "w")
+    out_f.write("name\t" + "\t".join(sample) + "\n")
+    for k, v in res.items():
+        l = [k]
+        for i in sample:
+            if i in v:
+                l.append(str(v[i]))
+                # l.append("1")
+            else:
+                l.append("0")
+        out_f.write("\t".join(l) + "\n")
+
+if __name__ == "__main__":
+    main(sys.argv[1], sys.argv[2], sys.argv[3])
+
+#### calcu_pnps_by_gene.py ####
+#!/share/data1/software/miniconda3/envs/jinxin/bin/python
+# Jinxin Meng, mengjx855@163.com
+# created date: 2025-08-28, 21:42:59
+# modified date: 2025-09-12, 21:45:41
+
+import re, sys, os, datetime
+import argparse, math, statistics
+from Bio import SeqIO
+import pandas as pd
+
+def parse_arguments():
+    '''
+    Calculate pN/pS for metagenomic genes. 
+    ref 1. Evolutionary and functional implications of hypervariable loci within the skin virome. 2017. PeerJ.
+    ref 2. Genomic variation landscape of the human gut microbiome. 2012. Nature.
+    Here some recommend codes for calling single nucleotide variant:
+    1. bowtie2-build gene.fa gene && bowtie2 --very-sensitive-local -k 1 -p 36 --no-unal -x gene -1 xx_1.fq.gz -2 xx_2.fq.gz 2>log |\\
+            samtools view -@ 10 -bS | samtools sort -@ 10 -o sample.sort.bam -
+    2. bcftools mpileup --threads 8 -d 20 -q 20 -Q 30 -f gene.fa xx.sort.bam |\\
+            bcftools call --threads 8 -mv --ploidy 1 |\\
+            bcftools filter -e 'QUAL<30 || DP<10 || (INFO/DP4[0]+INFO/DP4[1]+INFO/DP4[2]+INFO/DP4[3]) < 10 || INDEL=1' --threads 8 |\\
+            bcftools view -H -Oz -o xx.vcf.gz
+    3. calcu_pnps_by_gene.py gene.fa xx.vcf.gz xx
+    '''
+    parser = argparse.ArgumentParser(description=parse_arguments.__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('ref_fasta', type=str, help='reference gene fasta')
+    parser.add_argument('vcf_file', type=str, help='vcf file from bcftools')
+    parser.add_argument('out_prefix', type=str, help='name of output prefix')
+    parser.add_argument('--min-depth', metavar='', type=int, default=10, help='SNP minimum depth, corresponding to DP4 in vcf [default: 10]')
+    parser.add_argument('--snp-coverage', metavar='', type=float, default=0.05, help='SNP minimum coverage threshold [default: 0.05]')
+    parser.add_argument('--min-snps', metavar='', type=int, default=3, help='minimum SNP count within a gene [default: 3]')
+    parser.add_argument('--ns-ratio-file', metavar='', type=str, default='/share/data1/mjx/scripts/pNpS_data/sn_tot.list1', help='expected N/S ratio file [default: %(default)s]')
+    parser.add_argument('--quiet', action='store_true', help='suppress message [default: False]')
+    if len(sys.argv) == 1:
+        parser.print_help()
+        parser.exit()      
+    args = parser.parse_args()
+    return args
+
+def load_ref_sequences(ref_fasta):
+    sequences = {}
+    for record in SeqIO.parse(ref_fasta, 'fasta'):
+        sequences[record.id] = str(record.seq)
+    return sequences
+
+def process_vcf_file(vcf_file, min_depth, snp_coverage):
+    vcf_data = pd.read_csv(vcf_file, sep='\t', header=None, comment='#', dtype=object)
+    # Extract DP4 values (ref-forward, ref-reverse, alt-forward, alt-reverse)
+    dp4_values = vcf_data[7].apply(lambda x: re.search(r'DP4=(\S+?);', x).group(1))
+    dp4_values = dp4_values.apply(lambda x: list(map(int, x.split(','))))
+    total_depths = dp4_values.apply(sum)
+
+    # Filter by minimum depth
+    depth_filter = (total_depths >= min_depth)
+    vcf_data = vcf_data.loc[depth_filter].reset_index(drop=True)
+    dp4_values= dp4_values.loc[depth_filter].reset_index(drop=True)
+
+    # 参考等位基因为出现频率最高的等位基因。若变异频率高，则交换
+    swap_needed = [sum(x[:2]) < sum(x[2:]) for x in dp4_values]
+    vcf_data.loc[swap_needed, [3, 4]] = vcf_data.loc[swap_needed, [4, 3]].values
+    for idx, needs_swap in enumerate(swap_needed):
+        if needs_swap:
+            dp4_values[idx] = [dp4_values[idx][2], dp4_values[idx][3], dp4_values[idx][0], dp4_values[idx][1]]
+
+    # 过滤掉频率过低或过高的变异, 变异频率过低，可能是测序错误而非真正的变异；
+    freq_filter = [(sum(x[2:])/sum(x) >= snp_coverage) & (sum(x[2:])/sum(x) < (1-snp_coverage)) for x in dp4_values]
+    vcf_data = vcf_data[freq_filter].reset_index(drop=True)
+    dp4_values = [dp4_values[i] for i, keep in enumerate(freq_filter) if keep]
+        
+    # Add processed DP4 and alt depth to dataframe
+    vcf_data['dp4_string'] = [','.join(map(str, x)) for x in dp4_values]
+    vcf_data['alt_depth'] = [x[2] + x[3] for x in dp4_values]
+
+    return vcf_data
+
+def load_ns_ratio_data(ns_ratio_file):
+    # Load N/S ratio data from file
+    ns_data = pd.read_csv(ns_ratio_file, sep='\t', header=0)
+    ns_data.columns = ['codon_info', 'n_score', 's_score'] # N and S represent non-synonymous/synonymous substitution probabilities
+    ns_data['amino_acid'] = ns_data['codon_info'].apply(lambda x: x[5])
+    ns_data['codon'] = ns_data['codon_info'].apply(lambda x: x[:3])
+    return ns_data
+
+def analyze_snp_effects(vcf_data, ref_sequences, ns_ratio_file, min_snps_per_gene):
+    # Analyze the effects of SNPs on codons and amino acids
+    snp_info = pd.DataFrame(columns=['gene_id', 'ref_base', 'alt_base', 'position', 'alt_depth', 'ref_codon',
+                                     'alt_codon', 'codon_position', 'codon_start', 'codon_index', 'ref_aa', 'alt_aa'])
+    ns_data = load_ns_ratio_data(ns_ratio_file)
+    codon_to_aa_map = ns_data.set_index('codon')['amino_acid'].to_dict()
+
+    for idx in range(vcf_data.shape[0]):
+        gene_id = vcf_data.iloc[idx, 0] # 基因序列名称
+        position = int(vcf_data.iloc[idx, 1]) # SNP在基因上的位置
+        ref_base = vcf_data.iloc[idx, 3] # 参考等位基因
+        alt_base = vcf_data.iloc[idx, 4] # 突变等位基因
+        
+        # Calculate codon information
+        codon_position = (position - 1) % 3 # SNP在密码子中的位置
+        codon_start = position - codon_position # 密码子的起始位置
+        codon_index = (codon_start - 1) / 3 # 密码子的顺序位置
+
+        # 从参考序列中提取完整的密码子
+        if gene_id  in ref_sequences:
+            raw_codon = ref_sequences[gene_id][codon_start - 1: codon_start + 2]
+            if len(raw_codon) < 3:
+                continue
+        else:
+            print(f'Warning: Missing reference sequence for {gene_id} at position {position}')
+        
+        # 获取参考和变异密码子
+        if raw_codon[codon_position] == ref_base:
+            ref_codon = raw_codon
+            alt_codon = list(raw_codon)
+            alt_codon[codon_position] = alt_base
+            alt_codon = ''.join(alt_codon)
+        else:
+            alt_codon = raw_codon
+            ref_codon = list(raw_codon)
+            ref_codon[codon_position] = ref_base
+            ref_codon = ''.join(ref_codon)
+        
+        # 获取氨基酸
+        ref_aa = codon_to_aa_map.get(ref_codon, 'X')
+        alt_aa = codon_to_aa_map.get(alt_codon, 'X')
+
+        snp_info.loc[idx] = [gene_id, ref_base, alt_base, position, vcf_data.loc[idx, 'alt_depth'], ref_codon, alt_codon,
+                             codon_position + 1, codon_start, codon_index, ref_aa, alt_aa]
+
+    # # Filter genes with fewer than min_snps_per_gene SNPs
+    gene_snp_counts = snp_info['gene_id'].value_counts()
+    genes_to_keep = gene_snp_counts.index[gene_snp_counts >= min_snps_per_gene]
+    snp_info = snp_info[snp_info['gene_id'].isin(genes_to_keep)].reset_index(drop=True)
+    
+    # Add synonymous/non-synonymous classification
+    snp_info['nonsynonymous'] = (snp_info['ref_aa'] != snp_info['alt_aa']).astype(int)
+    snp_info['synonymous'] = (snp_info['ref_aa'] == snp_info['alt_aa']).astype(int)
+    
+    return snp_info
+
+def replace_base_at_position(sequence, position, new_base):
+    # 在指定索引位置替换字符
+    if position < 0 or position >= len(sequence):
+        return sequence # 索引超出范围，返回原字符串
+    return sequence[:position] + new_base + sequence[position+1:]
+
+def update_ref_sequences(ref_sequences, snp_info):
+    # Update reference sequences with reference alleles where needed
+    updated_sequences = {}
+
+    # Initialize with genes that have SNPs
+    for gene_id in snp_info['gene_id'].unique():
+        updated_sequences[gene_id] = ref_sequences[gene_id]
+
+    # Update sequences where necessary
+    for idx in range(snp_info.shape[0]):
+        snp = snp_info.iloc[idx]
+        if updated_sequences[snp['gene_id']][snp['position']-1] == snp['alt_base']:
+            updated_sequences[snp['gene_id']] = replace_base_at_position(updated_sequences[snp['gene_id']], snp['position']-1, snp['ref_base'])
+    
+    return updated_sequences
+
+def calculate_expected_ns_ratios(sequences, ns_ratio_file):
+    # Calculate expected N/S ratios for each gene
+    ns_data = load_ns_ratio_data(ns_ratio_file).set_index('codon')
+    expected_ratios = {}
+    for gene_id, sequence in sequences.items():
+        # Generate codons from sequence
+        codons = [sequence[i:i+3] for i in range(0, len(sequence)-2, 3) if len(sequence[i:i+3]) == 3]
+
+        # Calculate expected N and S scores
+        expected_n_score = 0
+        expected_s_score = 0
+        for codon in codons:
+            if codon in ns_data.index:
+                expected_n_score += ns_data.loc[codon]['n_score']
+                expected_s_score += ns_data.loc[codon]['s_score']
+                                                        
+        expected_ratios[gene_id] = [float(expected_n_score), float(expected_s_score)]
+    
+    return expected_ratios
+
+def calculate_pnps_v1(n_counts, expected_n, s_counts, expected_s, pseudo_count=1e-20):
+    if sum(n_counts) == 0 and sum(s_counts) == 0:
+        return 'NA'
+    pn = (sum(n_counts) + pseudo_count) / (expected_n + pseudo_count)
+    ps = (sum(s_counts) + pseudo_count) / (expected_s + pseudo_count)
+    return round(pn / ps, 8)
+
+def calculate_pnps_v2(n_counts, expected_n, s_counts, expected_s, alt_depths):
+    # Calculate pN/pS with smoothing using median depth
+    # Based on: https://peerj.com/articles/2959
+    if sum(n_counts) == 0 and sum(s_counts) == 0:
+        return 'NA'
+    # Smoothing factor: sqrt(median depth) / 2
+    pseudo_count = math.sqrt(statistics.median(alt_depths)) / 2
+    pn = (sum(n_counts) + pseudo_count) / expected_n
+    ps = (sum(s_counts) + pseudo_count) / expected_s
+    return round(pn / ps, 8)
+
+def calculate_gene_pnps_ratios(snp_info, expected_ratios):
+    # Calculate pN/pS ratios for each gene
+    # Group SNPs by gene
+    gene_groups = snp_info.groupby('gene_id')
+    
+    pnps_results = {}
+    for gene_id, gene_snps in gene_groups:
+        pnps = calculate_pnps_v2(gene_snps['nonsynonymous'], expected_ratios[gene_id][0],
+                                 gene_snps['synonymous'], expected_ratios[gene_id][1], gene_snps['alt_depth'])
+        pnps_results[gene_id] = round(float(pnps) if pnps != 'NA' else -1, 5)
+    # Convert to DataFrame for output
+    pnps_df = pd.DataFrame(list(pnps_results.items()), columns=['gene_id', 'pn_ps_ratio'])
+    return pnps_df
+
+def print_log(message, quiet=False):
+    if not quiet:
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f"[{timestamp}] {message}")
+
+def main():
+    # Main function to run the pN/pS analysis pipeline
+    args = parse_arguments()
+    print_log(f'Loading reference sequences from {args.ref_fasta}...', args.quiet)
+    ref_sequences = load_ref_sequences(args.ref_fasta)
+    print_log(f'Processing VCF file {args.vcf_file}...', args.quiet)
+    vcf_data = process_vcf_file(args.vcf_file, args.min_depth, args.snp_coverage)
+    print_log('Analyzing SNP effects on codons and amino acids...', args.quiet)
+    snp_info = analyze_snp_effects(vcf_data, ref_sequences, args.ns_ratio_file, args.min_snps)
+    print_log('Ensuring reference sequences match reference alleles...', args.quiet)
+    updated_sequences = update_ref_sequences(ref_sequences, snp_info)
+    print_log("Calculating expected N/S ratios for each gene...", args.quiet)
+    expected_ratios = calculate_expected_ns_ratios(updated_sequences, args.ns_ratio_file)
+    print_log('Calculating pN/pS ratios...', args.quiet)
+    pnps_results = calculate_gene_pnps_ratios(snp_info, expected_ratios)
+    print_log(f'Saving results', args.quiet)
+    out_path = os.path.dirname(args.out_prefix)
+    if out_path != '':
+        if not os.path.exists(out_path):
+            os.makedirs(out_path)
+    out_snp_file = f"{args.out_prefix}.snp_info.tsv"
+    out_pnps_file = f"{args.out_prefix}.pnps_results.tsv"
+    snp_info.to_csv(out_snp_file, sep='\t', index=False)
+    pnps_results.to_csv(out_pnps_file, sep='\t', index=False)
+    
+    total_genes = len(pnps_results)
+    valid_pnps = pnps_results[pnps_results['pn_ps_ratio'] > 0]
+            
+    print(f"========= Summary Statistics: =========")
+    print(f"1. Total genes analyzed: {total_genes}")
+    print(f"2. Genes with valid pN/pS: {len(valid_pnps)}")
+
+    if len(valid_pnps) > 0:
+        print(f"3. Mean pN/pS: {valid_pnps['pn_ps_ratio'].mean():.4f}")
+        print(f"4. Median pN/pS: {valid_pnps['pn_ps_ratio'].median():.4f}")
+        print(f"5. Min pN/pS: {valid_pnps['pn_ps_ratio'].min():.4f}")
+        print(f"6. Max pN/pS: {valid_pnps['pn_ps_ratio'].max():.4f}")
+        # Count genes with pN/pS > 1 (potential positive selection)
+        positive_selection = len(valid_pnps[valid_pnps['pn_ps_ratio'] > 1])
+        print(f"7. Genes with pN/pS > 1 (potential positive selection): {positive_selection} ({positive_selection/len(valid_pnps)*100:.1f}%)")
+        print(f"=======================================")
+
+if __name__ == '__main__':
+    main()
+#### tools_mashANI_cluster.py ####
+#!/data/software/miniconda3/envs/jinxin/bin/python
+# -*- encoding: utf-8 -*-
+##########################################################
+# Creater       :  夜下凝月
+# Created  date :  2024-03-20, 20:57:37
+# Modiffed date :  2024-03-20, 20:57:38
+##########################################################
+
+import argparse
+import logging
+
+def get_args():
+    parser = argparse.ArgumentParser(description = __doc__, formatter_class = argparse.RawTextHelpFormatter)
+    parser.add_argument('-i', required=True, help='mash result.')
+    parser.add_argument('-o', required=True, help="output file.")
+    parser.add_argument('-ani', default=0.95, type=float, help='ANI threshold. [0.95]')
+    parser.add_argument('-linkage_method', default="average", type=str, \
+            choices=['average','ward','complete','single','median','weighted'], help='linkage method. [average]')
+    args = parser.parse_args()
+    return args
+
+
+def main(ani_file, outf, ani_cut, linkage_method='average'):
+
+    import pandas as pd
+    import scipy
+    import numpy as np
+    import scipy.cluster
+    from scipy.spatial import distance as ssd
+
+    print(f"readfile:\t{ani_file}")
+    df = pd.read_csv(ani_file, sep="\t", header=None, usecols=[0,1,2])
+
+    df.columns=['ref','query','dist']
+
+    ## 距离矩阵
+    dist = df.pivot(index='ref',columns='query',values='dist').fillna(1)
+    #dist = df.pivot('ref','query','dist').fillna(1)
+    genomes_names = list(dist.columns)
+
+    arr = ssd.squareform(dist)
+
+    ## 聚类
+    linkage_cutoff = 1 - ani_cut
+
+    print(f"Running:\tCluster")
+    linkage = scipy.cluster.hierarchy.linkage(arr, method= linkage_method)
+    fclust = scipy.cluster.hierarchy.fcluster(linkage, linkage_cutoff, criterion='distance')
+
+
+    # 输出文件
+    print(f"Output: \t{outf}")
+    pd.DataFrame({'genomes':genomes_names,'cluster':fclust}) \
+        .sort_values(by=['cluster'], ascending=[True]) \
+        .to_csv(f"{outf}", sep="\t", index=None)
+
+if __name__ == "__main__":
+    args = get_args()
+    main(args.i, args.o, args.ani, args.linkage_method)
+```

@@ -1,0 +1,1314 @@
+---
+title: "Pig gut core-microbiota analysis - enterotype analysis"
+author: "Jinxin Meng"
+date: "2025-08-10"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## enterotype cluster
+```{R}
+#### genus PAM cluster ####
+library(clusterSim)
+
+profile <- fread('data/filtered_profile.g.ComBat.withCov.tsv') %>% 
+  column_to_rownames('name')
+# dist <- read.delim('ent_g.ComBat_withCov/jsd_dist.tsv', row.names = 1)
+# saveRDS(dist, 'ent_g.ComBat_withCov/jsd_dist.rds')
+dist <- readRDS('ent_g.ComBat_withCov/jsd_dist.rds')
+
+# PAM 按照不同的簇数量进行聚类分析
+# 使用index.G1函数计算Calinski-Harabasz (CH)指数确定最佳聚类数量; 
+# 使用silhouette函数计算silhouette轮廓系数评估聚类质量
+ncluster <- map_vec(1:10, ~ index.G1(x = t(profile), cl = PAM_clustering(dist, .x),
+                                     d = dist, centrotypes = 'medoids'), .progress = T)
+
+pdf('ent_g.ComBat_withCov/PAM_ncluster_CH_index.pdf', width = 6, height = 4)
+plot(ncluster, type = 'b', xlab = 'k clusters', ylab = 'Calinski-Harabasz index',
+     main = 'Optimal number of clusters')
+dev.off()
+
+data.frame(k_cluster = seq(2, 10), CH = ncluster[-1]) %>% 
+  ggline('k_cluster', 'CH', xlab = 'k clusters', ylab = 'Calinski-Harabasz index',
+         title = 'Optimal number of clusters', shape = 21,point.size = 3, plot_type = 'l') +
+  geom_point(size = 3, shape = 21, fill = 'white') +
+  scale_x_continuous(breaks = seq(1, 10)) +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(color = 'black', hjust = .5, face = 'bold'),
+        aspect.ratio = 1)
+ggsave('ent_g.ComBat_withCov/PAM_ncluster_CH_index.v2.pdf', width = 4, height = 4)
+
+# k = 3 聚类效果最好
+cluster <- PAM_clustering(dist, k = 3)
+data.frame(sample = colnames(profile), cluster = cluster) %>% 
+  write.table('ent_g.ComBat_withCov/PAM_3cluster.data.tsv', sep = '\t', row.names = F, quote = F)
+cluster <- read.delim('ent_g.ComBat_withCov/PAM_3cluster.data.tsv')
+
+# pcoa
+pcoa <- dudi.pco(as.dist(dist), scannf = F, nf = 2)
+# saveRDS(pcoa, 'ent_g.ComBat_withCov/dudi.pcoa.rds')
+pcoa <- readRDS('ent_g.ComBat_withCov/dudi.pcoa.rds')
+
+# default star plot 
+pdf('ent_g.ComBat_withCov/PAM_3cluster.pcoa_dudi.pdf', width = 8, height = 7)
+s.class(pcoa$li, fac = as.factor(cluster$cluster), grid = T,
+        sub = 'Principal coordiante analysis', col=c(2, 3, 4, 5))
+dev.off()
+
+# pcoa scatter plot
+pcoa_points <- pcoa$li %>%
+  rename_with(~ c('X1', 'X2')) %>%
+  rownames_to_column('sample') %>%
+  add_column(group = as.factor(cluster$cluster))
+
+plot_dim(pcoa_points, display_type = 'point', group_level = levels(pcoa_points$group), 
+         group_color = pald('set3', 3), show_line = F, add_group_label = T, ellipse_level = .9,
+         label_size = 4, xlab = 'PCoA1', ylab = 'PCoA2', aspect_ratio = 3/4) 
+ggsave('ent_g.ComBat_withCov/PAM_3cluster.pcoa_dot.pdf', width = 7, height = 6)
+
+ggscatter(pcoa_points, 'X1', 'X2', color = 'group', mean.point = T, star.plot = T,
+          xlab = 'PCoA1', ylab = 'PCoA2', size = 1, star.plot.lwd = .5, legend = 'right') +
+  scale_color_manual(values = pald('set3', 4)) +
+  theme(aspect.ratio = 1,
+        axis.ticks.length = unit(2, 'mm'))
+ggsave('ent_g.ComBat_withCov/PAM_3cluster.pcoa_star.pdf', width = 7, height = 6)
+
+#### genus representative ####
+# 1. calculate relationship between features and coordintes.
+cluster <- read.delim('ent_g.ComBat_withCov/PAM_3cluster.data.tsv')
+profile <- fread('data/filtered_profile.g.ComBat.withCov.tsv') %>% 
+  column_to_rownames('name')
+# pcoa <- readRDS('dudi.pcoa.rds')
+fit <- envfit(pcoa$li, t(profile))
+# saveRDS(fit, 'ent_g.ComBat_withCov/keys.envfit.rds')
+fit <- readRDS('ent_g.ComBat_withCov/keys.envfit.rds')
+
+data.frame(fit$vectors$arrows, r = fit$vectors$r, pval = fit$vectors$pvals) %>% 
+  rownames_to_column('name') %>% 
+  write.xlsx('ent_g.ComBat_withCov/envfit.xlsx')
+
+arrows <- data.frame(fit$vectors$arrows, r = fit$vectors$r, pval = fit$vectors$pvals) %>% 
+  filter(pval < 0.01) %>% 
+  arrange(desc(r)) %>% 
+  rownames_to_column('name') %>% 
+  head(n = 20)
+
+pcoa_points <- pcoa$li %>%
+  rename_with(~c('X1', 'X2')) %>%
+  rownames_to_column('sample') %>%
+  left_join(cluster, by = 'sample') %>% 
+  rename(group = cluster)
+  
+plot_dim(pcoa_points, group_level = unique(pcoa_points$group), display_type = 'point',
+         group_color = pald('set3', 4), aspect_ratio = 3/4, alpha = .6,
+         add_group_label = T, label_size = 4) +
+  geom_segment(aes(x = 0, y = 0, xend = A1 * 1/5, yend = A2 * 1/5), arrows, 
+               inherit.aes = F, arrow = arrow(length = unit( .2, 'cm')), 
+               linewidth = .5) +
+  ggrepel::geom_text_repel(aes(A1 * 1/5, A2 * 1/5, label = name), arrows, 
+                           fontface = 'italic', inherit.aes = F, size = 3)
+ggsave('ent_g.ComBat_withCov/PAM_3cluster.pcoa_fit.pdf', width = 7, height = 5)
+
+# 2. IndicatorSpecies
+source('/data/mengjx/R_proj/R_func/plot_pie.R')
+source('/data/mengjx/R_proj/R_func/palette.R')
+library(indicspecies)
+groups <- cluster$cluster[match(colnames(profile), cluster$sample)]
+model <- multipatt(t(profile), groups, duleg = T, func = 'IndVal.g', control = how(nperm = 999))
+saveRDS(model, 'ent_g.ComBat_withCov/keys.indicspecies.rds')
+data <- cbind(data.frame(model$A) %>% rename_with(~ paste0('A_', sub('X', '', .x))),
+              data.frame(model$B) %>% rename_with(~ paste0('B_', sub('X', '', .x))),
+              data.frame(model$sign) %>% dplyr::select(index, stat, p.value)) %>%
+  rownames_to_column('name')
+write.xlsx(data, 'ent_g.ComBat_withCov/keys.indicspecies.xlsx')
+
+data <- read.xlsx('ent_g.ComBat_withCov/keys.indicspecies.xlsx') %>% 
+  filter(p.value < 0.05)
+
+count(data, index) %>% 
+  mutate(index = paste0('ET-', index)) %>% 
+  ggbarplot('index', 'n', fill = 'index', palette = 'Set3', xlab = 'Indicspecies determination',
+            ylab = 'Number of feature', legend = 'none', label = .$n) +
+  theme(aspect.ratio = 3/2,
+        axis.ticks.length = unit(2, 'mm'),
+        text = element_text(size = 12))
+ggsave('ent_g.ComBat_withCov/keys.indicspecies.pdf', width = 2.8, height = 3)
+
+taxonomy <- fread('../pipeline/kraken2/kraken_build.taxonomy.tsv')
+
+map(1:3, ~ data %>% 
+      left_join(taxonomy, by = c('name' = 'genus')) %>% 
+      count(phylum, index) %>% 
+      filter(index == .x) %>% 
+      rename(name = phylum) %>% 
+      plot_pie(top_n = 10, color = '#000000', font_size = 3, title = paste0('ET-', .x),
+               fill = grDevices::colorRampPalette(pald('set3'))(10), add_n = T)) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', nrow = 1)
+ggsave('ent_g.ComBat_withCov/keys.indicspecies.pie.p.pdf', width = 12, height = 4)
+
+map(1:3, ~ data %>% 
+      left_join(taxonomy, by = c('name' = 'genus')) %>% 
+      count(family, index) %>% 
+      filter(index == .x) %>% 
+      rename(name = family) %>% 
+      plot_pie(top_n = 10, color = '#000000', font_size = 3, title = paste0('ET-', .x),
+               fill = grDevices::colorRampPalette(pald('set3'))(10), add_n = T)) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', nrow = 1)
+ggsave('ent_g.ComBat_withCov/keys.indicspecies.pie.f.pdf', width = 12, height = 4)
+
+# 3. abundance-based
+data <- data.frame(t(profile), check.names = F) %>%
+  rownames_to_column('sample') %>%
+  left_join(cluster) %>%
+  dplyr::select(-sample) %>%
+  aggregate(. ~ cluster, ., mean) %>%
+  mutate(cluster = paste0('cluster_', cluster)) %>%
+  column_to_rownames('cluster') %>%
+  t %>%
+  data.frame(check.names = F) %>%
+  rownames_to_column('name')
+write.xlsx(data, 'ent_g.ComBat_withCov/keys.avg.abundance.xlsx')
+
+# 4. diffs
+data <- data.frame(t(profile)) %>%
+  rownames_to_column('sample') %>%
+  left_join(cluster) %>%
+  dplyr::select(-sample)
+names <- colnames(data)[-ncol(data)]
+kruskal_test <- map_dfr(names, ~ rstatix::kruskal_test(data, as.formula(paste0(.x, ' ~ cluster'))))
+kruskal_effsize <- map_dfr(names, ~ rstatix::kruskal_effsize(data, as.formula(paste0(.x, ' ~ cluster'))))
+data <- left_join(dplyr::select(kruskal_test, name = .y., statistic, pval = p, method),
+                  dplyr::select(kruskal_effsize, name = .y., effsize, magnitude, eff_method = method),
+                  by = 'name') %>%
+  mutate(padj = p.adjust(pval, 'BH'))
+write.xlsx(data, 'ent_g.ComBat_withCov/keys.diffs.xlsx')
+
+# 5. prevalence
+filtered_profile <- apply(profile, 2, \(x) ifelse(x <= 0.001, 0, x)) %>% 
+  data.frame() %>% 
+  filter(rowSums(.) != 0)
+
+data <- data.frame(t(filtered_profile)) %>% 
+  rownames_to_column('sample') %>% 
+  left_join(cluster, by = 'sample') %>% 
+  dplyr::select(-sample) %>% 
+  group_by(cluster) %>% 
+  group_modify(~ map(.x, \(x) sum(x > 0) / length(x) * 100 ) %>% 
+                 data.frame) %>% 
+  mutate(cluster = paste0('cluster_', cluster)) %>% 
+  column_to_rownames('cluster') %>% 
+  t %>% 
+  data.frame() %>% 
+  rownames_to_column('name')
+write.xlsx(data, 'ent_g.ComBat_withCov/keys.prevalence.xlsx')
+
+#### sample type breed_lv1 ####
+library(ggmosaic)
+library(treemapify)
+
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  rename(sample = run_ID)
+
+data <- read.delim('ent_g.ComBat_withCov/PAM_3cluster.data.tsv') %>%
+  left_join(group, by = 'sample')
+
+group_name <- 'breed_lv1'
+plot_data <- dplyr::select(data, cluster, group = all_of(group_name)) %>%
+  mutate(cluster = as.character(cluster),
+         cluster = paste0('ET-', cluster)) %>%
+  filter(!is.na(group)) %>% 
+  count(cluster, group) %>% 
+  group_by(cluster) %>%
+  mutate(perc = n/sum(n),
+         perc_cum = cumsum(perc), # perc的累积和
+         ypos = perc_cum - perc / 2, # 中心位置，累积和减去当前百分比的一半
+         label = paste0(n, ',\n', round(perc * 100, 1), '%')) %>% 
+  add_column(xpos = c(rep(.15, 2), rep(.52, 2), rep(.88, 2)))
+
+test_data <- dplyr::select(plot_data, cluster, group, n) %>% 
+  spread('cluster', 'n') %>% 
+  column_to_rownames('group')
+chisq_test <- chisq.test(test_data)
+
+p1 <- ggplot(plot_data) +
+  geom_mosaic(aes(x = product(group, cluster), fill = group, weight = n), offset = .01, alpha = 1) +
+  geom_text(aes(xpos, ypos, label = label), plot_data, inherit.aes = F, size = 3) +
+  scale_y_continuous(labels = scales::percent_format(scale = 100, suffix = ''), expand = c(.02, 0)) +
+  scale_x_productlist(expand = c(.02, 0)) +
+  scale_fill_manual(values = c('#5773cc','#ffb900')) +
+  labs(x = 'Enterotype category', y = 'Sample proportion (%)', 
+       caption = paste0("Cramér's V: ", signif(rstatix::cramer_v(test_data), 3), ', ', 
+                        'P = ', signif(chisq_test$p.value, digits = 3)),
+       title = paste0(group_name, ' (n=', sum(plot_data$n), ')')) +
+  theme_pubr() +
+  theme(aspect.ratio = 3/2,
+        axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        legend.position = 'right')
+
+p2 <- pairwise_prop_test(test_data) %>% 
+  ggtexttable(theme = ttheme('light'), rows = NULL)
+
+cowplot::plot_grid(p1, p2, nrow = 1, align = 'v')
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.pdf'), width = 10, height = 5)
+
+#### sample type sex_lv1 ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  rename(sample = run_ID)
+
+data <- read.delim('ent_g.ComBat_withCov/PAM_3cluster.data.tsv') %>%
+  left_join(group, by = 'sample')
+
+group_name <- 'sex_lv1'
+plot_data <- dplyr::select(data, cluster, group = all_of(group_name)) %>%
+  mutate(cluster = as.character(cluster),
+         cluster = paste0('ET-', cluster)) %>%
+  filter(!is.na(group)) %>% 
+  count(cluster, group) %>% 
+  group_by(cluster) %>%
+  mutate(perc = n/sum(n),
+         perc_cum = cumsum(perc), # perc的累积和
+         ypos = perc_cum - perc / 2, # 中心位置，累积和减去当前百分比的一半
+         label = paste0(n, ',\n', round(perc * 100, 1), '%')) %>% 
+  add_column(xpos = c(rep(.12, 2), rep(.48, 2), rep(.85, 2)))
+
+test_data <- dplyr::select(plot_data, cluster, group, n) %>% 
+  spread('cluster', 'n') %>% 
+  column_to_rownames('group')
+chisq_test <- chisq.test(test_data)
+rstatix::cramer_v(test_data)
+
+p1 <- ggplot(plot_data) +
+  geom_mosaic(aes(x = product(group, cluster), fill = group, weight = n), offset = .01, alpha = 1) +
+  geom_text(aes(xpos, ypos, label = label), plot_data, inherit.aes = F, size = 3) +
+  scale_y_continuous(labels = scales::percent_format(scale = 100, suffix = ''), expand = c(.02, 0)) +
+  scale_x_productlist(expand = c(.02, 0)) +
+  scale_fill_manual(values = c('#5773cc','#ffb900')) +
+  labs(x = 'Enterotype category', y = 'Sample proportion (%)', 
+       caption = paste0("Cramér's V: ", signif(rstatix::cramer_v(test_data), 3), ', ', 
+                        'P = ', signif(chisq_test$p.value, digits = 3)),
+       title = paste0(group_name, ' (n=', sum(plot_data$n), ')')) +
+  theme_pubr() +
+  theme(aspect.ratio = 3/2,
+        axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        legend.position = 'right')
+
+p2 <- pairwise_prop_test(test_data) %>% 
+  ggtexttable(theme = ttheme('light'), rows = NULL)
+
+cowplot::plot_grid(p1, p2, nrow = 1, align = 'v')
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.pdf'), width = 10, height = 5)
+
+#### sample type growth_stage_lv1 ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  rename(sample = run_ID)
+
+data <- read.delim('ent_g.ComBat_withCov/PAM_3cluster.data.tsv') %>%
+  left_join(group, by = 'sample')
+
+group_name <- 'growth_stage_lv1'
+plot_data <- dplyr::select(data, cluster, group = all_of(group_name)) %>%
+  mutate(cluster = as.character(cluster),
+         cluster = paste0('ET-', cluster)) %>%
+  filter(!is.na(group)) %>% 
+  count(cluster, group) %>% 
+  mutate(group = factor(group, c('newborn','piglet','early stage of growing',
+                                 'middle stage of growing', 'growing',
+                                 'later stage of growing', 'adult','sow'))) %>% 
+  arrange(cluster, group) %>% 
+  group_by(cluster) %>%
+  mutate(perc = n/sum(n),
+         perc_cum = cumsum(perc), # perc的累积和
+         ypos = perc_cum - perc / 2, # 中心位置，累积和减去当前百分比的一半
+         label = paste0(n, ', ', round(perc * 100, 1), '%')) %>% 
+  add_column(xpos = c(rep(.12, 7), rep(.52, 8), rep(.9, 8)))
+
+test_data <- dplyr::select(plot_data, cluster, group, n) %>% 
+  spread('cluster', 'n', fill = 0) %>% 
+  column_to_rownames('group')
+chisq_test <- chisq.test(test_data)
+rstatix::cramer_v(test_data)
+chisq_test$expected
+
+ggplot(plot_data, aes(area = n, fill = group)) +
+  geom_treemap(color = '#ffffff', size = 1.5) +
+  geom_treemap_text(aes(label = label), color = 'black', place = 'centre', size = 7,
+                    min.size = 0) +
+  facet_grid(cols = vars(cluster)) +
+  scale_fill_manual(values = pald('set3')) +
+  theme_void() +
+  theme(aspect.ratio = 1,
+        legend.position = 'top',
+        strip.background = element_blank(),
+        strip.text = element_text(face = 'bold', hjust = .5))
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.treemap.pdf'), width = 10, height = 4)
+
+ggplot(plot_data) +
+  geom_mosaic(aes(x = product(group, cluster), fill = group, weight = n), offset = .01, alpha = 1) +
+  geom_text(aes(xpos, ypos, label = label), plot_data, inherit.aes = F, size = 3) +
+  scale_y_continuous(labels = scales::percent_format(scale = 100, suffix = ''), expand = c(.02, 0)) +
+  scale_x_productlist(expand = c(.02, 0)) +
+  scale_fill_manual(values = pald('set3')) +
+  labs(x = 'Enterotype category', y = 'Sample proportion (%)', 
+       caption = paste0("Cramér's V: ", signif(rstatix::cramer_v(test_data), 3), ', ', 
+                        'P = ', signif(chisq_test$p.value, digits = 3)),
+       title = paste0(group_name, ' (n=', sum(plot_data$n), ')')) +
+  theme_pubr() +
+  theme(aspect.ratio = 3/2,
+        axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        legend.position = 'right')
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.pdf'), width = 6, height = 5)
+
+group_level <- c('newborn','piglet','early stage of growing', 
+                 'middle stage of growing', 'growing',
+                 'later stage of growing', 'adult','sow')
+
+prop_test <- map_dfr(group_level, ~ 
+                       rownames_to_column(test_data, 'name') %>% 
+                       mutate(name = ifelse(name != .x, 'other', .x)) %>% 
+                       aggregate(. ~ name, ., sum) %>% 
+                       mutate(name = factor(name, c(.x, 'other'))) %>% 
+                       arrange(name) %>% 
+                       column_to_rownames('name') %>%
+                       prop_test(detailed = T) %>% 
+                       add_column(name = paste0(.x, '_vs_Other'), .before = 1) )
+write.xlsx(prop_test, paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.prop_test.xlsx'))
+
+prop_test %>% 
+  mutate(name = sub('_vs_Other', '', name),
+         label = paste0('P < ', p)) %>% 
+  ggbarplot('name', 'statistic', fill = 'name', sort.val = 'asc', sort.by.groups = F, 
+            palette = colorRampPalette(pald('rainbow3'))(8), legend = 'none', rotate = T,
+            ylab = 'Chi-squared Test statistic', xlab = '', label = .$label, lab.vjust = .5,
+            lab.hjust = -.05) +
+  theme(aspect.ratio = 2,
+        axis.ticks.length = unit(2, 'mm'))
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.prop_test.pdf'), width = 4, height = 4)
+
+prop_test %>% 
+  dplyr::select(name, `ET-` = starts_with('estimate')) %>% 
+  mutate(name = sub('_vs_Other', '', name)) %>% 
+  gather('group', 'value', -name) %>% 
+  ggbarplot('group', 'value', fill = 'group', legend = 'none', xlab = '', ylab = 'Proporation',
+            palette = pald('set3')) +
+  facet_wrap(~ name, scale = 'free', nrow = 2) +
+  theme(aspect.ratio = 3/2,
+        strip.background = element_blank(),
+        strip.text = element_text(face = 'bold', hjust = .5),
+        axis.ticks.length = unit(2, 'mm'))
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.proporation.pdf'), width = 8, height = 6)
+
+pairwise_prop_test <- map_dfr(group_level, ~ 
+                                rownames_to_column(test_data, 'name') %>% 
+                                mutate(name = ifelse(name != .x, 'other', .x)) %>% 
+                                aggregate(. ~ name, ., sum) %>% 
+                                mutate(name = factor(name, c(.x, 'other'))) %>% 
+                                arrange(name) %>% 
+                                column_to_rownames('name') %>% 
+                                pairwise_prop_test(p.adjust.method = 'BH') %>% 
+                                add_column(name = paste0(.x, '_vs_Other'), .before = 1) )
+write.xlsx(pairwise_prop_test, paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.pairwise.prop_test.xlsx'))
+
+#### sample type region_lv2 ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  rename(sample = run_ID)
+
+data <- read.delim('ent_g.ComBat_withCov/PAM_3cluster.data.tsv') %>%
+  left_join(group, by = 'sample')
+
+group_name <- 'region_lv2'
+plot_data <- dplyr::select(data, cluster, group = all_of(group_name)) %>%
+  mutate(cluster = as.character(cluster),
+         cluster = paste0('ET-', cluster)) %>%
+  filter(!is.na(group)) %>% 
+  count(cluster, group) %>% 
+  mutate(group = factor(group, c('gastric content','duodenal content','jejunal content',
+                                 'ileal content','cecal content','colonic content',
+                                 'rectal content','feces'))) %>% 
+  arrange(cluster, group) %>% 
+  group_by(cluster) %>%
+  mutate(perc = n/sum(n),
+         perc_cum = cumsum(perc), # perc的累积和
+         ypos = perc_cum - perc / 2, # 中心位置，累积和减去当前百分比的一半
+         label = paste0(n, ', ', round(perc * 100, 1), '%')) %>% 
+  add_column(xpos = c(rep(.15, 7), rep(.52, 8), rep(.85, 6)))
+
+test_data <- dplyr::select(plot_data, cluster, group, n) %>% 
+  spread('cluster', 'n', fill = 0) %>% 
+  column_to_rownames('group')
+chisq_test <- chisq.test(test_data)
+chisq_test$expected
+
+ggplot(plot_data, aes(area = n, fill = group)) +
+  geom_treemap(color = '#ffffff', size = 1.5) +
+  geom_treemap_text(aes(label = label), color = 'black', place = 'centre', size = 7,
+                    min.size = 0) +
+  facet_grid(cols = vars(cluster)) +
+  scale_fill_manual(values = pald('set3')) +
+  theme_void() +
+  theme(aspect.ratio = 1,
+        legend.position = 'top',
+        strip.background = element_blank(),
+        strip.text = element_text(face = 'bold', hjust = .5))
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.treemap.pdf'), width = 10, height = 4)
+
+ggplot(plot_data) +
+  geom_mosaic(aes(x = product(group, cluster), fill = group, weight = n), offset = .01, alpha = 1) +
+  geom_text(aes(xpos, ypos, label = label), plot_data, inherit.aes = F, size = 3) +
+  scale_y_continuous(labels = scales::percent_format(scale = 100, suffix = ''), expand = c(.02, 0)) +
+  scale_x_productlist(expand = c(.02, 0)) +
+  scale_fill_manual(values = pald('set3')) +
+  labs(x = 'Enterotype category', y = 'Sample proportion (%)', 
+       caption = paste0("Cramér's V: ", signif(rstatix::cramer_v(test_data), 3), ', ', 
+                        'P = ', signif(chisq_test$p.value, digits = 3)),
+       title = paste0(group_name, ' (n=', sum(plot_data$n), ')')) +
+  theme_pubr() +
+  theme(aspect.ratio = 3/2,
+        axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        legend.position = 'right')
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.pdf'), width = 6, height = 5)
+
+group_level <- c('gastric content','jejunal content',
+                 'ileal content','cecal content','colonic content',
+                 'rectal content','feces')
+
+prop_test <- map_dfr(group_level, ~ 
+                       rownames_to_column(test_data, 'name') %>% 
+                       mutate(name = ifelse(name != .x, 'other', .x)) %>% 
+                       aggregate(. ~ name, ., sum) %>% 
+                       mutate(name = factor(name, c(.x, 'other'))) %>% 
+                       arrange(name) %>% 
+                       column_to_rownames('name') %>%
+                       prop_test(detailed = T) %>% 
+                       add_column(name = paste0(.x, '_vs_Other'), .before = 1) )
+write.xlsx(prop_test, paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.prop_test.xlsx'))
+
+prop_test %>% 
+  mutate(name = sub('_vs_Other', '', name),
+         label = paste0('P < ', p)) %>% 
+  ggbarplot('name', 'statistic', fill = 'name', sort.val = 'asc', sort.by.groups = F, 
+            palette = colorRampPalette(pald('rainbow3'))(8), legend = 'none', rotate = T,
+            ylab = 'Chi-squared Test statistic', xlab = '', label = .$label, lab.vjust = .5,
+            lab.hjust = -.05) +
+  theme(aspect.ratio = 2,
+        axis.ticks.length = unit(2, 'mm'))
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.prop_test.pdf'), width = 4, height = 4)
+
+prop_test %>% 
+  dplyr::select(name, `ET-` = starts_with('estimate')) %>% 
+  mutate(name = sub('_vs_Other', '', name)) %>% 
+  gather('group', 'value', -name) %>% 
+  ggbarplot('group', 'value', fill = 'group', legend = 'none', xlab = '', ylab = 'Proporation',
+            palette = pald('set3')) +
+  facet_wrap(~ name, scale = 'free', nrow = 2) +
+  theme(aspect.ratio = 3/2,
+        strip.background = element_blank(),
+        strip.text = element_text(face = 'bold', hjust = .5),
+        axis.ticks.length = unit(2, 'mm'))
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.proporation.pdf'), width = 8, height = 6)
+
+pairwise_prop_test <- map_dfr(group_level, ~ 
+                                rownames_to_column(test_data, 'name') %>% 
+                                mutate(name = ifelse(name != .x, 'other', .x)) %>% 
+                                aggregate(. ~ name, ., sum) %>% 
+                                mutate(name = factor(name, c(.x, 'other'))) %>% 
+                                arrange(name) %>% 
+                                column_to_rownames('name') %>% 
+                                pairwise_prop_test(p.adjust.method = 'BH') %>% 
+                                add_column(name = paste0(.x, '_vs_Other'), .before = 1) )
+write.xlsx(pairwise_prop_test, paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.pairwise.prop_test.xlsx'))
+
+#### sample type collection_year ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  rename(sample = run_ID)
+
+data <- read.delim('ent_g.ComBat_withCov/PAM_3cluster.data.tsv') %>%
+  left_join(group, by = 'sample')
+
+group_name <- 'collection_year'
+plot_data <- dplyr::select(data, cluster, group = all_of(group_name)) %>%
+  mutate(cluster = as.character(cluster),
+         cluster = paste0('ET-', cluster),
+         group = as.character(group)) %>%
+  filter(!is.na(group) & group > 2010) %>% 
+  count(cluster, group) %>% 
+  group_by(cluster) %>%
+  mutate(perc = n/sum(n),
+         perc_cum = cumsum(perc), # perc的累积和
+         ypos = perc_cum - perc / 2, # 中心位置，累积和减去当前百分比的一半
+         label = paste0(n, ', ', round(perc * 100, 1), '%')) %>% 
+  add_column(xpos = c(rep(.15, 12), rep(.52, 12), rep(.85, 12)))
+
+test_data <- dplyr::select(plot_data, cluster, group, n) %>% 
+  spread('cluster', 'n', fill = 0) %>% 
+  column_to_rownames('group')
+chisq_test <- chisq.test(test_data)
+chisq_test$expected
+
+ggplot(plot_data, aes(area = n, fill = group)) +
+  geom_treemap(color = '#ffffff', size = 1.5) +
+  geom_treemap_text(aes(label = label), color = 'black', place = 'centre', size = 7,
+                    min.size = 0) +
+  facet_grid(cols = vars(cluster)) +
+  scale_fill_manual(values = pald('set3')) +
+  theme_void() +
+  theme(aspect.ratio = 1,
+        legend.position = 'top',
+        strip.background = element_blank(),
+        strip.text = element_text(face = 'bold', hjust = .5))
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.treemap.pdf'), width = 10, height = 4)
+
+ggplot(plot_data) +
+  geom_mosaic(aes(x = product(group, cluster), fill = group, weight = n), offset = .01, alpha = 1) +
+  geom_text(aes(xpos, ypos, label = label), plot_data, inherit.aes = F, size = 3) +
+  scale_y_continuous(labels = scales::percent_format(scale = 100, suffix = ''), expand = c(.02, 0)) +
+  scale_x_productlist(expand = c(.02, 0)) +
+  scale_fill_manual(values = pald('set3')) +
+  labs(x = 'Enterotype category', y = 'Sample proportion (%)', 
+       caption = paste0("Cramér's V: ", signif(rstatix::cramer_v(test_data), 3), ', ', 
+                        'P = ', signif(chisq_test$p.value, digits = 3)),
+       title = paste0(group_name, ' (n=', sum(plot_data$n), ')')) +
+  theme_pubr() +
+  theme(aspect.ratio = 3/2,
+        axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        legend.position = 'right')
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.pdf'), width = 6, height = 5)
+
+prop_test <- map_dfr(as.character(2012:2023), ~ 
+                       rownames_to_column(test_data, 'name') %>% 
+                       mutate(name = ifelse(name != .x, 'other', .x)) %>% 
+                       aggregate(. ~ name, ., sum) %>% 
+                       mutate(name = factor(name, c(.x, 'other'))) %>% 
+                       arrange(name) %>% 
+                       column_to_rownames('name') %>%
+                       prop_test(detailed = T) %>% 
+                       add_column(name = paste0(.x, '_vs_Other'), .before = 1) )
+write.xlsx(prop_test, paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.prop_test.xlsx'))
+
+prop_test %>% 
+  mutate(name = sub('_vs_Other', '', name),
+         label = paste0('P < ', p)) %>% 
+  ggbarplot('name', 'statistic', fill = 'name', sort.val = 'asc', sort.by.groups = F, 
+            palette = colorRampPalette(pald('rainbow3'))(12), legend = 'none', rotate = T,
+            ylab = 'Chi-squared Test statistic', xlab = '', label = .$label, lab.vjust = .5,
+            lab.hjust = -.05) +
+  theme(aspect.ratio = 2,
+        axis.ticks.length = unit(2, 'mm'))
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.prop_test.pdf'), width = 4, height = 5)
+
+prop_test %>% 
+  dplyr::select(name, `ET-` = starts_with('estimate')) %>% 
+  mutate(name = sub('_vs_Other', '', name)) %>% 
+  gather('group', 'value', -name) %>% 
+  ggbarplot('group', 'value', fill = 'group', legend = 'none', xlab = '', ylab = 'Proporation',
+            palette = pald('set3')) +
+  facet_wrap(~ name, scale = 'free', nrow = 3) +
+  theme(aspect.ratio = 3/2,
+        strip.background = element_blank(),
+        strip.text = element_text(face = 'bold', hjust = .5),
+        axis.ticks.length = unit(2, 'mm'))
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.proporation.pdf'), width = 8, height = 9)
+
+pairwise_prop_test <- map_dfr(as.character(2012:2023), ~ 
+                                rownames_to_column(test_data, 'name') %>% 
+                                mutate(name = ifelse(name != .x, 'other', .x)) %>% 
+                                aggregate(. ~ name, ., sum) %>% 
+                                mutate(name = factor(name, c(.x, 'other'))) %>% 
+                                arrange(name) %>% 
+                                column_to_rownames('name') %>% 
+                                pairwise_prop_test(p.adjust.method = 'BH') %>% 
+                                add_column(name = paste0(.x, '_vs_Other'), .before = 1) )
+write.xlsx(pairwise_prop_test, paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.pairwise.prop_test.xlsx'))
+
+#### sample type location_lv1 ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  rename(sample = run_ID)
+
+data <- read.delim('ent_g.ComBat_withCov/PAM_3cluster.data.tsv') %>%
+  left_join(group, by = 'sample')
+
+group_name <- 'location_lv1'
+plot_data <- dplyr::select(data, cluster, group = all_of(group_name)) %>%
+  mutate(cluster = as.character(cluster),
+         cluster = paste0('ET-', cluster)) %>%
+  filter(!is.na(group) & group != 'Africa') %>% 
+  count(cluster, group) %>% 
+  group_by(cluster) %>%
+  mutate(perc = n/sum(n),
+         perc_cum = cumsum(perc), # perc的累积和
+         ypos = perc_cum - perc / 2, # 中心位置，累积和减去当前百分比的一半
+         label = paste0(n, ', ', round(perc * 100, 1), '%')) %>% 
+  add_column(xpos = c(rep(.15, 4), rep(.52, 4), rep(.85, 4)))
+
+test_data <- dplyr::select(plot_data, cluster, group, n) %>% 
+  spread('cluster', 'n', fill = 0) %>% 
+  column_to_rownames('group')
+chisq_test <- chisq.test(test_data)
+chisq_test$expected
+
+ggplot(plot_data, aes(area = n, fill = group)) +
+  geom_treemap(color = '#ffffff', size = 1.5) +
+  geom_treemap_text(aes(label = label), color = 'black', place = 'centre', size = 7,
+                    min.size = 0) +
+  facet_grid(cols = vars(cluster)) +
+  scale_fill_manual(values = pald('set3')) +
+  theme_void() +
+  theme(aspect.ratio = 1,
+        legend.position = 'top',
+        strip.background = element_blank(),
+        strip.text = element_text(face = 'bold', hjust = .5))
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.treemap.pdf'), width = 10, height = 4)
+
+ggplot(plot_data) +
+  geom_mosaic(aes(x = product(group, cluster), fill = group, weight = n), offset = .01, alpha = 1) +
+  geom_text(aes(xpos, ypos, label = label), plot_data, inherit.aes = F, size = 3) +
+  scale_y_continuous(labels = scales::percent_format(scale = 100, suffix = ''), expand = c(.02, 0)) +
+  scale_x_productlist(expand = c(.02, 0)) +
+  scale_fill_manual(values = pald('set3')) +
+  labs(x = 'Enterotype category', y = 'Sample proportion (%)', 
+       caption = paste0("Cramér's V: ", signif(rstatix::cramer_v(test_data), 3), ', ', 
+                        'P = ', signif(chisq_test$p.value, digits = 3)),
+       title = paste0(group_name, ' (n=', sum(plot_data$n), ')')) +
+  theme_pubr() +
+  theme(aspect.ratio = 3/2,
+        axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        legend.position = 'right')
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.pdf'), width = 6, height = 5)
+
+prop_test <- map_dfr(rownames(test_data), ~ 
+                       rownames_to_column(test_data, 'name') %>% 
+                       mutate(name = ifelse(name != .x, 'other', .x)) %>% 
+                       aggregate(. ~ name, ., sum) %>% 
+                       mutate(name = factor(name, c(.x, 'other'))) %>% 
+                       arrange(name) %>% 
+                       column_to_rownames('name') %>%
+                       prop_test(detailed = T) %>% 
+                       add_column(name = paste0(.x, '_vs_Other'), .before = 1) )
+write.xlsx(prop_test, paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.prop_test.xlsx'))
+
+prop_test %>% 
+  mutate(name = sub('_vs_Other', '', name),
+         label = paste0('P < ', p)) %>% 
+  ggbarplot('name', 'statistic', fill = 'name', sort.val = 'asc', sort.by.groups = F, 
+            palette = colorRampPalette(pald('rainbow3'))(4), legend = 'none', rotate = T,
+            ylab = 'Chi-squared Test statistic', xlab = '', label = .$label, lab.vjust = .5,
+            lab.hjust = -.05) +
+  theme(aspect.ratio = 1,
+        axis.ticks.length = unit(2, 'mm'))
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.prop_test.pdf'), width = 4, height = 3)
+
+prop_test %>% 
+  dplyr::select(name, `ET-` = starts_with('estimate')) %>% 
+  mutate(name = sub('_vs_Other', '', name)) %>% 
+  gather('group', 'value', -name) %>% 
+  ggbarplot('group', 'value', fill = 'group', legend = 'none', xlab = '', ylab = 'Proporation',
+            palette = pald('set3')) +
+  facet_wrap(~ name, scale = 'free', nrow = 1) +
+  theme(aspect.ratio = 3/2,
+        strip.background = element_blank(),
+        strip.text = element_text(face = 'bold', hjust = .5),
+        axis.ticks.length = unit(2, 'mm'))
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.proporation.pdf'), width = 8, height = 3)
+
+pairwise_prop_test <- map_dfr(rownames(test_data), ~ 
+                                rownames_to_column(test_data, 'name') %>% 
+                                mutate(name = ifelse(name != .x, 'other', .x)) %>% 
+                                aggregate(. ~ name, ., sum) %>% 
+                                mutate(name = factor(name, c(.x, 'other'))) %>% 
+                                arrange(name) %>% 
+                                column_to_rownames('name') %>% 
+                                pairwise_prop_test(p.adjust.method = 'BH') %>% 
+                                add_column(name = paste0(.x, '_vs_Other'), .before = 1) )
+write.xlsx(pairwise_prop_test, paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.pairwise.prop_test.xlsx'))
+
+#### sample type location_lv2 ####
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  rename(sample = run_ID)
+
+data <- read.delim('ent_g.ComBat_withCov/PAM_3cluster.data.tsv') %>%
+  left_join(group, by = 'sample')
+
+group_name <- 'location_lv2'
+# Netherlands: 34; Belgium: 33; Poland: 31; Austria: 26; Norway: 24; Bulgaria: 23; UK: 7; Japan: 4; Gabon: 2
+plot_data <- dplyr::select(data, cluster, group = all_of(group_name)) %>%
+  mutate(cluster = as.character(cluster),
+         cluster = paste0('ET-', cluster)) %>%
+  filter(!is.na(group) & !group %in% 
+           c('Gabon','Netherlands','Belgium','Poland','Austria','Norway','Bulgaria','UK','Japan') ) %>% 
+  count(cluster, group) %>% 
+  group_by(cluster) %>%
+  mutate(perc = n/sum(n),
+         perc_cum = cumsum(perc), # perc的累积和
+         ypos = perc_cum - perc / 2, # 中心位置，累积和减去当前百分比的一半
+         label = paste0(n, ', ', round(perc * 100, 1), '%')) %>% 
+  add_column(xpos = c(rep(.15, 12), rep(.52, 12), rep(.85, 12)))
+
+test_data <- dplyr::select(plot_data, cluster, group, n) %>% 
+  spread('cluster', 'n', fill = 0) %>% 
+  column_to_rownames('group')
+chisq_test <- chisq.test(test_data)
+chisq_test$expected
+
+ggplot(plot_data, aes(area = n, fill = group)) +
+  geom_treemap(color = '#ffffff', size = 1.5) +
+  geom_treemap_text(aes(label = label), color = 'black', place = 'centre', size = 7,
+                    min.size = 0) +
+  facet_grid(cols = vars(cluster)) +
+  scale_fill_manual(values = pald('set3')) +
+  theme_void() +
+  theme(aspect.ratio = 1,
+        legend.position = 'top',
+        strip.background = element_blank(),
+        strip.text = element_text(face = 'bold', hjust = .5))
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.treemap.pdf'), width = 10, height = 4)
+
+ggplot(plot_data) +
+  geom_mosaic(aes(x = product(group, cluster), fill = group, weight = n), offset = .01, alpha = 1) +
+  geom_text(aes(xpos, ypos, label = label), plot_data, inherit.aes = F, size = 3) +
+  scale_y_continuous(labels = scales::percent_format(scale = 100, suffix = ''), expand = c(.02, 0)) +
+  scale_x_productlist(expand = c(.02, 0)) +
+  scale_fill_manual(values = pald('set3')) +
+  labs(x = 'Enterotype category', y = 'Sample proportion (%)', 
+       caption = paste0("Cramér's V: ", signif(rstatix::cramer_v(test_data), 3), ', ', 
+                        'P = ', signif(chisq_test$p.value, digits = 3)),
+       title = paste0(group_name, ' (n=', sum(plot_data$n), ')')) +
+  theme_pubr() +
+  theme(aspect.ratio = 3/2,
+        axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        legend.position = 'right')
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.pdf'), width = 7, height = 6)
+
+prop_test <- map_dfr(rownames(test_data), ~ 
+                       rownames_to_column(test_data, 'name') %>% 
+                       mutate(name = ifelse(name != .x, 'other', .x)) %>% 
+                       aggregate(. ~ name, ., sum) %>% 
+                       mutate(name = factor(name, c(.x, 'other'))) %>% 
+                       arrange(name) %>% 
+                       column_to_rownames('name') %>%
+                       prop_test(detailed = T) %>% 
+                       add_column(name = paste0(.x, '_vs_Other'), .before = 1) )
+write.xlsx(prop_test, paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.prop_test.xlsx'))
+
+prop_test %>% 
+  mutate(name = sub('_vs_Other', '', name),
+         label = paste0('P < ', p)) %>% 
+  ggbarplot('name', 'statistic', fill = 'name', sort.val = 'asc', sort.by.groups = F, 
+            palette = colorRampPalette(pald('rainbow3'))(12), legend = 'none', rotate = T,
+            ylab = 'Chi-squared Test statistic', xlab = '', label = .$label, lab.vjust = .5,
+            lab.hjust = -.05) +
+  theme(aspect.ratio = 2,
+        axis.ticks.length = unit(2, 'mm'))
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.prop_test.pdf'), width = 4, height = 5)
+
+prop_test %>% 
+  dplyr::select(name, `ET-` = starts_with('estimate')) %>% 
+  mutate(name = sub('_vs_Other', '', name)) %>% 
+  gather('group', 'value', -name) %>% 
+  ggbarplot('group', 'value', fill = 'group', legend = 'none', xlab = '', ylab = 'Proporation',
+            palette = pald('set3')) +
+  facet_wrap(~ name, scale = 'free', nrow = 3) +
+  theme(aspect.ratio = 3/2,
+        strip.background = element_blank(),
+        strip.text = element_text(face = 'bold', hjust = .5),
+        axis.ticks.length = unit(2, 'mm'))
+ggsave(paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.proporation.pdf'), width = 8, height = 9)
+
+pairwise_prop_test <- map_dfr(rownames(test_data), ~ 
+                                rownames_to_column(test_data, 'name') %>% 
+                                mutate(name = ifelse(name != .x, 'other', .x)) %>% 
+                                aggregate(. ~ name, ., sum) %>% 
+                                mutate(name = factor(name, c(.x, 'other'))) %>% 
+                                arrange(name) %>% 
+                                column_to_rownames('name') %>% 
+                                pairwise_prop_test(p.adjust.method = 'BH') %>% 
+                                add_column(name = paste0(.x, '_vs_Other'), .before = 1) )
+write.xlsx(pairwise_prop_test, paste0('ent_g.ComBat_withCov/sample_type.', group_name, '.pairwise.prop_test.xlsx'))
+
+#### genus top 12 compos #### 
+source('/data/mengjx/R_proj/R_func/calcu_diff.R')
+source('/data/mengjx/R_proj/R_func/profile_process.R')
+source('/data/mengjx/R_proj/R_func/taxa.R')
+
+cluster <- read.delim('ent_g.ComBat_withCov/PAM_3cluster.data.tsv') %>% 
+  rename(group = cluster)
+
+profile <- read.delim('data/filtered_profile.g.ComBat.withCov.tsv', row.names = 1)
+  
+plot_data <- profile_top_n(profile, n = 12, out_other = F) %>% 
+  profile_smp2grp(cluster) %>% 
+  rownames_to_column('name') %>% 
+  gather('group', 'value', -name) %>% 
+  mutate(group = paste0('ET-', group),
+         name = sub('g__', '', name))
+
+plot_text <- read.xlsx('ent_g.ComBat_withCov/keys.diffs.xlsx') %>% 
+  dplyr::select(name, effsize, magnitude, FDR = padj) %>% 
+  add_plab(by = 'FDR', format = 2) %>% 
+  mutate(name = sub('g__', '', name),
+         effsize = round(effsize, 5),
+         FDR = round(FDR, 5)) %>% 
+  filter(name %in% plot_data$name)
+
+p1 <- ggbarplot(plot_data, 'group', 'value', fill = 'name', palette = 'Set3', legend = 'right',
+                xlab = '', ylab = 'Relative abundance (%)', title = 'Top 12 abundant genus taxa') +
+  scale_y_continuous(expand = c(.03, .03)) +
+  theme(aspect.ratio = 3/2,
+        axis.ticks.length = unit(2, 'mm'),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 12),
+        plot.title = element_text(size = 13, face = 'bold', hjust = .5),
+        legend.text = element_text(size = 10, face = 'italic'))
+
+p2 <- ggtexttable(plot_text, theme = ttheme('light'), rows = NULL)
+
+cowplot::plot_grid(p1, p2)  
+ggsave('ent_g.ComBat_withCov/keys.genus.top12.barplot.pdf', width = 10, height = 6)
+
+#### genus top 12 diff boxplots ####
+cluster <- read.delim('ent_g.ComBat_withCov/PAM_3cluster.data.tsv') %>% 
+  rename(group = cluster)
+
+profile <- read.delim('data/filtered_profile.g.ComBat.withCov.tsv', row.names = 1)
+
+data <- profile_top_n(profile, n = 12, out_other = F)
+data <- data.frame(t(data), check.names = F) %>% 
+  rownames_to_column('sample') %>% 
+  left_join(cluster, by = 'sample') %>% 
+  dplyr::select(-sample)
+data <- gather(data, 'name', 'value', -group) %>% 
+  mutate(group = paste0('ET-', group),
+         name = sub('g__', '', name))
+
+plots <- map(unique(data$name), ~ {
+  plot_data <- filter(data, name == .x)
+  ypos <- quantile(plot_data$value, probs = .75, names = F) + 1.7 * IQR(plot_data$value)
+  ggboxplot(plot_data, 'group', 'value', fill = 'group', xlab = '', ylab = 'Relative abundance (%)',
+            width = .7, legend = 'none', palette = 'Set3', outliers = F, title = .x) +
+    stat_compare_means(comparisons = list(c('ET-1', 'ET-2'), c('ET-1', 'ET-3'), c('ET-2', 'ET-3')), 
+                       method = 'wilcox', tip.length = .002 * sqrt(ypos), step.increase = .005 * sqrt(ypos), 
+                       label.y = ypos, label = 'p.signif', vjust = .9) +
+    theme(aspect.ratio = 3/2,
+          axis.ticks.length = unit(2, 'mm'),
+          axis.text = element_text(size = 12),
+          axis.title = element_text(size = 12),
+          plot.title = element_text(face = 'bold.italic', size = 12, hjust = .5)) })
+
+cowplot::plot_grid(plotlist = plots, align = 'v', nrow = 2)
+ggsave('ent_g.ComBat_withCov/keys.genus.top12.boxplot.pdf', width = 15, height = 7)
+
+
+#### diff species ####
+library(lme4)
+library(emmeans)
+
+cluster <- read.delim('ent_g.ComBat_withCov/PAM_3cluster.data.tsv') %>% 
+  rename(group = cluster) 
+
+profile <- fread('data/filtered_profile.s.f.tsv') %>% 
+  column_to_rownames('name')
+
+group <- read.xlsx('../sample_info/metadata.xlsx') %>% 
+  filter(run_ID %in% colnames(profile)) %>% 
+  rename(sample = run_ID) %>% 
+  left_join(cluster, by = 'sample')
+
+data <- profile_smp2grp(profile, dplyr::select(group, sample, group)) %>% 
+  rownames_to_column('species') %>% 
+  left_join(taxonomy, ., by = 'species')
+write.xlsx(data, 'ent_g.ComBat_withCov/keys.species.avg_ab.xlsx')
+
+# pb <- txtProgressBar(style = 3) # 新建进度条
+# x = 1
+# emmeans_estimate <- list()
+# emmeans_contrast <- list()
+# for (i in rownames(profile)) {
+#   data <- data.frame(value = t(profile[i,])) %>% 
+#     rename(value = 1) %>% 
+#     rownames_to_column('sample') %>% 
+#     left_join(group, by = 'sample') %>% 
+#     mutate(group = as.factor(group))
+#   model <- lmer(value ~ group + (1|project_ID), data = data)
+#   emmeans <- emmeans(model, pairwise ~ group, adjust = 'fdr') %>% suppressMessages()
+#   
+#   emmeans_estimate[[i]] <- add_column(data.frame(emmeans$emmeans), name = i, .before = 1)
+#   emmeans_contrast[[i]] <- add_column(data.frame(emmeans$contrasts), name = i, .before = 1)
+#   
+#   setTxtProgressBar(pb, x/nrow(profile))
+#   x = x + 1
+#   }
+# close(pb)
+# 
+# emmeans_estimate <- map_dfr(emmeans_estimate, ~ .x)
+# write.table(emmeans_estimate, 'ent_g.ComBat_withCov/species.diffs.by_cluster.estimate.txt', 
+#             sep = '\t', row.names = F, quote = F)
+# write.xlsx(emmeans_estimate, 'ent_g.ComBat_withCov/species.diffs.by_cluster.estimate.xlsx')
+# 
+# emmeans_contrast <- map_dfr(emmeans_contrast, ~ .x)
+# write.table(emmeans_contrast, 'ent_g.ComBat_withCov/species.diffs.by_cluster.contrast.txt', 
+#             sep = '\t', row.names = F, quote = F)
+# write.xlsx(emmeans_contrast, 'ent_g.ComBat_withCov/species.diffs.by_cluster.contrast.xlsx')
+
+#### ML ####
+source('/data/mengjx/R_proj/R_func/plot_roc.R')
+cluster <- read.delim('ent_g.ComBat_withCov/PAM_3cluster.data.tsv') %>% 
+  rename_with(~ c('sample', 'group')) %>% 
+  mutate(group = paste0('ET-', group))
+
+pred <- read.delim('ent_g.ComBat_withCov/rf_model.pred.tsv', check.names = F)
+pred <- left_join(pred, cluster, by = 'sample')
+
+# One-vs-Rest (OvR)
+roc <- map(c('ET-1', 'ET-2', 'ET-3'), ~ {
+  y_true <- ifelse(pred$group == .x, 1, 0) # 真实标签：是否属于该类
+  y_score <- pred[[.x]] # 预测概率：对应列
+  roc(y_true, y_score) } ) %>% 
+  set_names(c('ET-1', 'ET-2', 'ET-3'))
+roc_mlt <- multiclass.roc(pred$group, as.matrix(pred[, c('ET-1', 'ET-2', 'ET-3')]))
+plot_roc_multiple(roc, title = 'Random Forest Model') +
+  annotate('text', x = 1, y = .05, label = 'Multi-class AUC (defined by Hand and Till): 0.978', 
+           hjust = 1)
+ggsave(file = 'ent_g.ComBat_withCov/roc_list.pdf', width = 7, height = 4)
+
+#### LDA ####
+source('/data/mengjx/R_proj/R_func/MGX_utilities.R')
+source('/data/mengjx/R_proj/R_func/palette.R')
+library(microeco)
+
+profile <- fread('data/filtered_profile.g.ComBat.withCov.tsv') %>% 
+  column_to_rownames('name')
+group <- read.delim('ent_g.ComBat_withCov/PAM_3cluster.data.tsv') %>% 
+  rename_with(~ c('sample', 'group')) %>% 
+  mutate(group = paste0('ET-', group)) %>% 
+  column_to_rownames('sample')
+tax <- data.frame(row.names = rownames(profile)) %>% 
+  add_column(family = 'A') %>% 
+  add_column(genus = rownames(.))
+
+# lefse 分析
+set.seed(2024)
+dataset <- microtable$new(sample_table = group, otu_table = profile, tax_table = tax)
+lefse <- trans_diff$new(dataset = dataset, method = 'lefse', group = 'group', alpha = 0.05, 
+                        p_adjust_method = 'BH', taxa_level = 'genus')
+data <- tidy_LEfSe(lefse$res_diff)
+write.xlsx(data, 'ent_g.ComBat_withCov/keys.lefse.xlsx')
+
+# 可视化 LDA
+plot_data <- data %>% 
+  filter(!grepl('F23|PeH17|RF16|UBA|SFTJ01|CAG|RUG|Phil1|ER4', name)) %>% 
+  slice_max(n = 20, order_by = LDA) %>% 
+  arrange(LDA)
+
+ggbarplot(plot_data, 'name', 'LDA', fill = 'enriched', palette = c('#80b1d3','#b3de69','#fdb462'),
+            rotate = T, ylab = 'LDA score', xlab = '') +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(axis.text.y = element_text(face = 'italic'),
+        panel.grid.major = element_line(color = 'grey88', linewidth = .4, linetype = 'longdash'),
+        axis.ticks.length = unit(2, 'mm'))
+ggsave('ent_g.ComBat_withCov/keys.lefse.top20.barplot.pdf', width = 5, height = 6)
+
+# 箱线图 丰度
+plot_data <- profile[plot_data$name,]
+plot_data <- data.frame(t(plot_data), check.names = F) %>% 
+  rownames_to_column('sample') %>% 
+  left_join(rownames_to_column(group, 'sample'), by = 'sample') %>% 
+  dplyr::select(-sample)
+plot_data <- gather(plot_data, 'name', 'value', -group)
+
+plots <- map(unique(plot_data$name), ~ {
+  .plot_data <- filter(plot_data, name == .x)
+  .ypos <- group_by(.plot_data, group) %>% 
+    summarise(iqr = IQR(value), up_quantile = quantile(value, probs = .75)) %>% 
+    mutate(up_limit = up_quantile + 1.5 * iqr) %>% 
+    pull() %>% max
+  .test <- rstatix::wilcox_test(.plot_data, value ~ group) %>% 
+    mutate(ypos = cumsum(.ypos * c(1.09, .09, .09)),
+           xmin = as.numeric(factor(group1, levels = c('ET-1', 'ET-2', 'ET-3'))),
+           xmax = as.numeric(factor(group2, levels = c('ET-1', 'ET-2', 'ET-3'))))
+  ggboxplot(.plot_data, 'group', 'value', fill = 'group', xlab = '', ylab = 'Relative abundance (%)',
+            width = .7, legend = 'none', palette = c('#80b1d3','#b3de69','#fdb462'), 
+            outliers = F, title = .x) +
+    coord_cartesian(ylim = c(NA, .ypos * 1.3)) +
+    ggsignif::geom_signif(annotations = .test$p.adj.signif, xmin = .test$xmin, xmax = .test$xmax,
+                          y_position = .test$ypos, vjust = .8, textsize = 4, size = .3,
+                          tip_length = 0) +
+    theme(aspect.ratio = 3/2,
+          axis.ticks.length = unit(2, 'mm'),
+          axis.text = element_text(size = 12),
+          axis.title = element_text(size = 12),
+          plot.title = element_text(face = 'bold.italic', size = 12, hjust = .5)) } )
+cowplot::plot_grid(plotlist = plots, align = 'v', nrow = 4)
+ggsave('ent_g.ComBat_withCov/keys.lefse.top20.boxplot.pdf', width = 12, height = 12)
+```
+
+## pipeline
+```{sh}
+scripts/calcu_dist.py data/filtered_profile.g.ComBat.withCov.tsv ent_g.ComBat_withCov/jsd_dist.tsv -m jsd
+```
+
+## python scripts
+```{py}
+#### calcu_dist.py ####
+#!/data/software/miniconda3/envs/jinxin/bin/python
+# Jinxin Meng, mengjx855@163.com
+# created date: 2025-07-18, 08:20:20
+# modified date: 2025-09-13, 20:13:54
+import sys, argparse, datetime
+import numpy as np
+import pandas as pd
+from scipy.spatial.distance import pdist, squareform
+
+def parse_arguments():
+    '''
+    微生物组数据计算距离矩阵前推荐的转换方法: 
+    1. 对于计数格式数据，执行 Hellinger 转换，也就是 TSS 标准化，并每个相对丰度值取平方根；
+    2. 对于组成型格式数据，直接进行平方根转换即可；
+    其他：
+    1. Hellinger 转换：适用于 Bray–Curtis、Euclidean 等基于丰度的生态学距离计算，可减少高丰度类群的主导效应，让稀有类群在距离计算中有更合理的权重。
+    2. 如果要计算 Aitchison 距离（基于组成型数据的几何欧氏距离），则应使用 CLR 转换 而不是 Hellinger。
+    3. 二元存在/缺失类型的距离（如二元 Jaccard、unweighted UniFrac）则不需要做 Hellinger，而是先将数据转为 presence/absence 格式。
+    '''
+    parser = argparse.ArgumentParser(description=parse_arguments.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('in_file', type=str, help='input file [profile, variables × samples]')
+    parser.add_argument('out_file', type=str, help='output file [distance matrix]')
+    parser.add_argument('--method', metavar='' , default='bray', choices=['bray','jsd','cosine','euclidean','jaccard'],
+                        help='the method for distance or dissimilarity [default:bray]')
+    parser.add_argument('--pseudocount', metavar='', type=int, default=1e-6, help='specify the pseudocount [default: 1e-6]')
+    parser.add_argument('--normalize', choices=['none', 'TSS', 'CSS', 'TMM', 'RLE'], default='TSS', help='data normalization using none, TSS, CSS, TMM, RLE [default: TSS]')
+    parser.add_argument('--transform', choices=['none', 'log', 'sqrt', 'clr'], default='none', help='data transformation using none, log, sqrt, clr [default: none]')
+    parser.add_argument('--quiet', action='store_true', help='suppress message [default: False]')
+    if len(sys.argv) == 1:
+        parser.print_help()
+        parser.exit()
+    args = parser.parse_args()
+    return args
+
+def transform_data(data, method, pseudocount):
+    '''
+    对数据应用变换, data (pd.DataFrame): 样本 × 特征的数据框
+    '''
+    if method == 'none':
+        return data
+     # 添加伪计数以避免对0取对数
+    transformed = data.copy()
+    if method in ['log', 'clr']:
+        transformed = transformed.replace(0, pseudocount)
+    # 数据转换
+    if method == 'log':
+        return np.log(transformed)
+    elif method == 'sqrt':
+        return np.sqrt(transformed)
+    elif method == 'clr':
+        # 中心对数比率变换 (Centered Log-Ratio)
+        log_transformed = np.log(transformed)
+        return log_transformed.subtract(log_transformed.mean(axis=1), axis=0)
+
+def normalize_data(data, method='TSS', pseudocount=1e-6):
+    '''
+    data (pd.DataFrame): 样本 × 特征的数据框
+    method (str): 归一化方法，可选值包括:
+    - 'TSS': 总和标准化 (Total Sum Scaling)
+    - 'CSS': 累积和标准化 (Cumulative Sum Scaling)
+    - 'RLE': 相对对数表达 (Relative Log Expression)
+    - 'TMM': 修剪均值 M 值 (Trimmed Mean of M-values)
+    - 'NONE': 不进行归一化
+    pseudocount (float): 用于处理零值的伪计数
+    '''
+    # 创建数据副本以避免修改原始数据
+    normalized = data.copy()
+    if method == 'none':
+        return normalized
+    elif method == 'TSS':
+        # 总和标准化: 每个样本除以其总和
+        col_sums = normalized.sum(axis=1)
+        normalized = normalized.div(col_sums, axis=0)
+    elif method == 'CSS':
+        # 累积和标准化: 基于分位数的归一化
+        normalized = normalized.replace(0, np.nan)
+        # 对每个样本计算分位数阈值和缩放因子
+        scaling_factors = []
+        for index, row in normalized.iterrows():
+            quantile_value = row.quantile(0.5)
+            scaling_factor = row[row <= quantile_value].sum()
+            scaling_factors.append(scaling_factor)
+        # 应用缩放因子
+        normalized = normalized.fillna(0)  # 将NaN改回零
+        normalized = normalized.div(pd.Series(scaling_factors, index=normalized.index), axis=0)
+    elif method == 'RLE':
+        # 相对对数表达: 使用几何平均值作为参考
+        # 添加伪计数以避免对零取对数
+        normalized = normalized.replace(0, pseudocount)
+        # 计算每个特征的几何平均值
+        log_data = np.log(normalized)
+        geo_means = log_data.mean(axis=0)  # 在样本维度上计算平均值
+        # 对每个样本计算缩放因子
+        factors = []
+        for index, row in log_data.iterrows():
+            # 计算该样本相对于几何平均值的中位数差异
+            median_diff = np.median(row - geo_means)
+            factors.append(np.exp(median_diff))
+        # 应用归一化因子
+        normalized = normalized.div(pd.Series(factors, index=normalized.index), axis=0)
+    elif method == 'TMM':
+        # 修剪均值M值: 类似于RLE但使用加权修剪均值
+        pass
+    else:
+        return data
+
+    if normalized.isnull().values.any():
+        normalized = normalized.fillna(0)
+    return normalized
+
+def calcu_distance(data, method, pseudocount):
+    '''
+    data (pd.DataFrame): 样本 × 特征的数据框
+    '''
+    # 数据检查与预处理
+    if data.isnull().values.any():
+        print('[Warning] 输入数据包含NaN，已用0替换。')
+        data = df.fillna(0)
+    if (data.values < 0).any():
+        print('[Warning] 输入数据包含负值，这可能影响某些距离计算方法。')
+
+    # 转置数据使样本在行
+    samples = data.values.astype(np.float64)
+    if method == 'bray':
+        # Bray-Curtis距离适用于丰度数据
+        if (samples < 0).any():
+            print('[Warning] 数据含负数，Bray-Curtis距离可能不适用。')
+        dist_vec = pdist(samples, metric='braycurtis')
+    elif method == 'cosine':
+        # 余弦距离衡量样本向量方向的差异
+        dist_vec = pdist(samples, metric='cosine')
+    elif method == 'euclidean':
+        # 欧氏距离计算样本在特征空间的直线距离
+        dist_vec = pdist(samples, metric='euclidean')
+    elif method == 'jaccard':
+        # Jaccard距离衡量样本集合的相似性，将数据转换为存在/不存在(1/0)
+        binary_samples = (samples > 0).astype(float)
+        dist_vec = pdist(binary_samples, metric='jaccard')
+    elif method == 'jsd':
+        # Jensen-Shannon距离需要概率分布, 添加伪计数并归一化
+        samples = np.clip(samples, pseudocount, None)
+        samples = samples / samples.sum(axis=1, keepdims=True)
+        if np.any(samples < 0):
+            raise ValueError('数据包含负值！')
+        if np.any(np.isnan(samples)):
+            raise ValueError('数据包含NaN值！')
+        dist_vec = pdist(samples, metric='jensenshannon')
+    else:
+        raise ValueError(f'不支持的距离计算方法: {method}')
+    dist_matrix = pd.DataFrame(squareform(dist_vec), columns=data.index, index=data.index)
+    
+    return dist_matrix
+
+def main():
+    start_time = datetime.datetime.now()
+    args = parse_arguments()
+    data = pd.read_csv(args.in_file, sep='\t', index_col=0)
+    data = data.T
+    
+    if args.transform != 'none':
+        data = transform_data(data, args.transform, args.pseudocount)
+
+    if args.normalize:
+        data = normalize_data(data, 'TSS', args.pseudocount)
+    
+    dist_matrix = calcu_distance(data, args.method, args.pseudocount)
+    dist_matrix.to_csv(args.out_file, sep='\t', index=True, index_label='name', float_format='%.8f')
+    
+    end_time = datetime.datetime.now()
+    elapsed = (end_time - start_time).total_seconds()
+    if not args.quiet:
+        print(f'程序执行完成，耗时: {elapsed:.2f}秒')
+
+if __name__ == '__main__':
+    main()
+    
+#### calcu_jsd_dist.py ####
+#!/data/software/miniconda3/envs/jinxin/bin/python
+# Jinxin Meng, mengjx855@163.com
+# created date: 2025-07-18, 08:20:20
+# modified date: 2025-07-18, 08:20:20
+
+import sys
+import numpy as np
+import pandas as pd
+from scipy.spatial.distance import pdist, squareform
+
+if len(sys.argv) != 3:
+    sys.exit(f'Usage: {sys.argv[0]} [profile] [out_file]')
+
+def jsd(p, q):
+    """计算两个概率分布p和q的Jensen-Shannon距离"""
+    p = np.asarray(p, dtype=np.float64)
+    q = np.asarray(q, dtype=np.float64)
+
+    # 添加伪计数避免log(0)
+    pseudocount = 1e-6
+    p = np.where(p == 0, pseudocount, p)
+    q = np.where(q == 0, pseudocount, q)
+
+    p /= p.sum()
+    q /= q.sum()
+
+    m = 0.5 * (p + q)
+    kld_pm = np.sum(p * np.log(p / m))
+    kld_qm = np.sum(q * np.log(q / m))
+    jsd = np.sqrt(0.5 * (kld_pm + kld_qm))
+    return jsd
+
+def compute_jsd_distance_matrix(profile, pseudocount=1e-6):
+    """
+    计算profile矩阵（行：特征，列：样本）两两JSD距离矩阵
+    输入：
+        profile_matrix: numpy array，shape = (features, samples)
+        pseudocount: 避免0值的伪计数
+    返回：
+        距离矩阵（samples x samples），numpy array
+    """
+    # 转置，变成samples x features，方便计算距离
+    samples = profile.T
+
+    # 添加伪计数并归一化（概率分布）
+    samples = np.where(samples == 0, pseudocount, samples)
+    samples = samples / samples.sum(axis=1, keepdims=True)
+
+    # 定义一个距离函数用于pdist
+    def jsd_metric(u, v):
+        m = 0.5 * (u + v)
+        kld_pm = np.sum(u * np.log(u / m))
+        kld_vm = np.sum(v * np.log(v / m))
+        return np.sqrt(0.5 * (kld_pm + kld_vm))
+
+    # 计算距离向量
+    dist_vec = pdist(samples, metric=jsd_metric)
+
+    # 转成矩阵
+    dist_mat = squareform(dist_vec)
+    return pd.DataFrame(dist_mat, columns=profile.columns, index=profile.columns)
+
+if __name__ == '__main__':
+    profile = pd.read_csv(sys.argv[1], sep='\t', index_col=0)
+    dist_matrix = compute_jsd_distance_matrix(profile)
+    dist_matrix.to_csv(sys.argv[2], sep='\t', index=True, index_label='name')
+```
+

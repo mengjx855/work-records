@@ -1,0 +1,119 @@
+---
+title: "Lactobacillus rhamnosus genomics ZhangYN"
+author: "Jinxin Meng"
+date: "2025-04-30"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## Pipeline
+
+```{bash}
+# ref download
+datasets download genome taxon "Lacticaseibacillus rhamnosus" --include genome --assembly-source RefSeq --assembly-level chromosome,complete --fast-zip-validation
+
+# fastp
+cat raw_fq.filelist | parallel -j 3 --colsep="\t" run_fastp.sh {2} clean_fq/{1}
+
+# ref-based
+bwa-mem2 index ref.GCF_039857935.1.GG.fna -p bwa_map_ref/ref.GCF_039857935.1.GG
+cat clean_fq.filelist | parallel -j 10 --colsep="\t" bwa-mem2 mem -t 12 bwa_map_ref/ref.GCF_039857935.1.GG {2} {3} 2\> bwa_map_ref/{1}.log \| samtools view -bS \| samtools sort -o bwa_map_ref/{1}.sort.bam -
+cut -f1 clean_fq.filelist | parallel -j 3 samtools index bwa_map_ref/{}.sort.bam
+
+# de novo
+cat clean_fq.filelist | parallel -j 3 --colsep="\t" spades.py --isolate -1 {2} -2 {3} -t 16 -k 21,33,55,77,99,121 -o spades/{1} >/dev/null 2>/dev/null
+for i in LGG1 LGG3 LGG4;do seqkit seq -g -m 200 $i/scaffolds.fasta | seqkit replace -p ".*" -r "$i|{nr}" --nr-width 3 -o $i.fa ;done
+
+# quast
+cut -f1 clean_fq.filelist | parallel -j 3 quast --silent -t 16 -r ref_genome/GCF_006151905.1.fna -g prokka/{}/{}.gff -1 clean_fq/{}.clean_1.fq.gz -2 clean_fq/{}.clean_2.fq.gz -o quast/{} spades/{}.fa
+
+# sspace
+cut -f1 clean_fq.filelist | parallel -j 3 bwa-mem2 index spades/{}/scaffolds.fasta -p bwa_map_contigs/{}
+cat clean_fq.filelist | parallel -j 3 --colsep="\t" bwa-mem2 mem -t 32 bwa_map_contigs/{1} {2} {3} 2\> bwa_map_contigs/{1}.log \| samtools view -@ 8 -bS \| samtools sort -@ 8 -o bwa_map_contigs/{1}.sort.bam - 
+cut -f1 clean_fq.filelist | parallel -j 3 java -jar $picard CollectInsertSizeMetrics -I bwa_map_contigs/{}.sort.bam -O bwa_map_contigs/{}.insert_size_metrics.txt -H bwa_map_contigs/{}.insert_size_histogram.pdf -M 0.5
+cut -f1 ../clean_fq.filelist | parallel -j 3 SSPACE_Basic_v2.0.pl -l {}.lib.tsv -s ../spades/{}/contigs.fasta -x 0 -T 24 -b {}
+
+# skani
+cut -f1 clean_fq.filelist | parallel -j 3 skani dist -q spades/{}.fa --rl ref_genome.filepath -o skani/{}.skani --slow --detailed
+cut -f1 clean_fq.filelist | parallel -j 3 fastANI -q spades/{}.fa --rl ref_genome.filepath -o fastani/{}.fastani -t 24
+
+# prokka
+cut -f1 clean_fq.filelist | parallel -j 3 prokka spades/{}.fa --outdir prokka/{} --prefix {} --kingdom Bacteria --addgenes --cpus 12 --quiet
+cut -f1 ref_genome.filepath | parallel -j 12 prokka {} --outdir prokka/{/.} --prefix {/.} --kingdom Bacteria --addgenes --cpus 8 --quiet
+
+# bakta
+cut -f1 clean_fq.filelist | parallel -j 3 bakta --prefix {} --output bakta/{} --threads 16 spades/{}.fa
+
+# full-length 16S rRNA
+grep 16S */*tsv
+seqkit grep -p EJOOALFH_02665 LGG1/LGG1.ffn > LGG1.SSU.fa
+seqkit grep -p ODJPJAMM_02726 LGG3/LGG3.ffn > LGG3.SSU.fa
+seqkit grep -p PPFMPKGE_02787 LGG4/LGG4.ffn > LGG4.SSU.fa
+for i in LGG1 LGG3 LGG4;do seqkit replace -p ".*" -r "$i" $i.SSU.fa; done > SSU.fa
+blastn -query SSU.fa -db /data/database/silva/full/SILVA_138_SSURef_NR99_tax_silva_trunc.BAC -evalue 1e-5 -max_target_seqs 5 -num_threads 10 -outfmt 6 -out out.btn
+cut -f2 out.btn | sort -u | grep -f - /data/database/silva/full/SILVA_138_SSURef_NR99_tax_silva_trunc.BAC.tax > out.tax
+
+# pan-genome
+roary -e --mafft -p 110 -f default/ ../prokka/LGG1/LGG1.gff ../prokka/LGG3/LGG3.gff ../prokka/LGG4/LGG4.gff
+roary -e --mafft -p 110 -f default_full/ ../prokka/*/*.gff
+
+# kofamscan
+seqkit replace -p " .*" -r "" ../prokka/LGG*/*faa > LGG.faa
+kofamscan LGG.faa -o LGG.kofam -p /data/database/KEGG/20241226/profiles -k /data/database/KEGG/20241226/ko_list --cpu 110 -f mapper --no-report-unannotated
+
+# COG
+emapper.py --cpu 80 -i kofam/LGG.faa --itype proteins --output_dir eggnog/ --output LGG
+```
+
+## pan-genome downstream analysis
+
+```{R}
+#### pan-genome ####
+data <- read.csv('../pipeline/roary/default_full/gene_presence_absence.csv', 
+                 check.names = F) %>% 
+  column_to_rownames('Gene') %>% 
+  select(starts_with(c('GC', 'LGG'))) %>% 
+  apply(2, \(x) ifelse(x == '', 0, 1))
+
+# PCoA
+dist <- vegan::vegdist(t(data), method = 'jaccard')
+
+PCoA <- cmdscale(dist, k = 2, eig = T)
+
+PCoA_points <- data.frame(PCoA$points) %>% 
+  dplyr::rename_with(~ c('X1', 'X2')) %>% 
+  tibble::rownames_to_column('name') %>% 
+  mutate(class = ifelse(grepl('LGG', name), 'LGG', 'ref')) %>% 
+  left_join(read.delim('../data/genome_info.tsv'), by = 'name')
+
+PCoA_eig <- round(PCoA$eig/sum(PCoA$eig) * 100, digits = 2)
+
+ggscatter(PCoA_points, 'X1', 'X2', color = 'class') +
+  ggrepel::geom_text_repel(aes(label = strain, color = class), size = 1.5, 
+                           min.segment.length = 1, max.overlaps = 100) +
+  theme(aspect.ratio = 1,
+        axis.ticks.length = unit(2, 'mm'))
+ggsave('pan-genome.scatter.pdf', width = 6, height = 6.5)
+
+# ggtree
+library(ggtree)
+
+annotation <- read.delim('../data/genome_info.tsv') %>% 
+  select(node = name, strain) %>% 
+  mutate(label = paste0(node, '|', strain))
+
+colnames(data) <- annotation$label[match(colnames(data), annotation$node)]
+
+dist <- vegan::vegdist(t(data), method = 'jaccard')
+hclust <- hclust(dist)
+
+ggtree(hclust) +
+  geom_tiplab(aes(node = node))
+ggsave('pan-genome.hclust.pdf', width = 5, height = 8)
+```

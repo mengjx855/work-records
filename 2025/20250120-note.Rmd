@@ -1,0 +1,361 @@
+---
+title: "scRNA PLA treat D2 Mus crypt"
+author: "Jinxin Meng"
+date: "2025-01-20"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## scRNA PLA treat D2 Mus crypt
+
+```{R}
+#### 读入原始数据 ####
+name <- list.files('../data/')
+path <- paste0(list.files('../data/', full.names = T))
+
+seurat_list <- map2(path, name, \(x, y) {
+  message(paste0('Processing: ', y)) 
+  count <- Read10X(x)
+  CreateSeuratObject(counts = count, project = y, min.cells = 5, min.features = 100)
+})
+
+seurat <- merge(seurat_list[[1]], seurat_list[-1], add.cell.ids = name) %>% 
+  JoinLayers()
+
+saveRDS(seurat, 'seurat.raw.rds')
+
+# table(seurat@meta.data$orig.ident)
+#   PBS   PLA  
+# 11810 10400
+# dim(seurat)
+# [1] 20865 22210
+
+#### QC质控 ####
+seurat <- readRDS('seurat.raw.rds')
+
+seurat <- PercentageFeatureSet(seurat, pattern = '^mt-', col.name = 'percent_mt') # 线粒体
+seurat <- PercentageFeatureSet(seurat, pattern = '^Rp[sl]', col.name = 'percent_rb') # 核糖体
+seurat <- PercentageFeatureSet(seurat, pattern = '^Hb[^(p)]', col.name = 'percent_hb') # 血红蛋白
+
+p1 <- VlnPlot(seurat, group.by = 'orig.ident', pt.size = 0, ncol = 2,
+              features = c('nFeature_RNA', 'nCount_RNA')) + NoLegend()
+
+p2 <- VlnPlot(seurat, group.by = 'orig.ident', pt.size = 0, ncol = 3,
+              features = c('percent_mt', 'percent_rb', 'percent_hb')) + 
+  scale_y_continuous(breaks = seq(0, 100, 5)) + NoLegend()
+
+cowplot::plot_grid(p1, p2, ncol = 1, align = 'v')
+ggsave('qc_before.pdf', width = 6, height = 10)
+
+# 细胞过滤
+seurat <- subset(seurat, subset = percent_mt < 30 & nFeature_RNA > 100 & 
+                   nFeature_RNA < 6000)
+
+p1 <- VlnPlot(seurat, group.by = 'orig.ident', pt.size = 0, ncol = 2,
+              features = c('nFeature_RNA', 'nCount_RNA')) + NoLegend()
+
+p2 <- VlnPlot(seurat, group.by = 'orig.ident', pt.size = 0, ncol = 3,
+              features = c('percent_mt', 'percent_rb', 'percent_hb') ) + NoLegend()
+
+cowplot::plot_grid(p1, p2, ncol = 1, align = 'v')
+ggsave('qc_after.pdf', width = 6, height = 10)
+
+# 过滤后细胞数量
+dim(seurat)
+# [1] 20865  11995
+
+#### 数据降维和聚类 #### 
+seurat <- NormalizeData(seurat, normalization.method = 'LogNormalize', scale.factor = 1e4, verbose = T) # 标准化
+seurat <- FindVariableFeatures(seurat, selection.method = 'vst', nfeatures = 2000) # 筛选高变基因
+VariableFeaturePlot(seurat, cols = c('grey','red'))
+seurat <- ScaleData(seurat) # 数据归一化，这步骤有一步回归的分析，去除噪声
+seurat <- RunPCA(seurat, features = VariableFeatures(seurat)) # PCA线性降维分析
+ElbowPlot(seurat, ndims = 30) # 流石图协助选择PC维度 10
+seurat <- RunHarmony(seurat, 'orig.ident') # Harmony去批次
+seurat <- RunUMAP(seurat, dims = 1:18, reduction = 'harmony')
+seurat <- RunTSNE(seurat, dims = 1:18, reduction = 'harmony')
+seurat <- FindNeighbors(seurat, reduction = 'harmony', dims = 1:18)
+seurat <- FindClusters(seurat, resolution = c(seq(0, 2.9, .2)))
+
+map2(paste0('RNA_snn_res.', seq(0, 2.9, .2)), paste0('SNN: ', seq(0, 2.9, .2)), ~
+       DimPlot(seurat, reduction = 'tsne', group.by = .x, label = T) +
+       ggtitle(.y) + 
+       theme(aspect.ratio = 1) + 
+       guides(color = 'none')) %>% 
+  plot_grid(plotlist = ., nrow = 3)
+ggsave('tsne.SNN.dimplot.jpg', width = 20, height = 12)
+
+#### 细胞注释 ####
+markers <- list(
+  Stem_cells = c('Lgr5','Hopx','Bmi1','Ascl2','Olfm4','Smoc2'),
+  Paneth_cells = c('Ang4','Lyz1','Agr2','Mptx1'),
+  Goblet_cells = c('Muc2','Ccl9','Clca1','Tff3','Agr2','Fcgbp','Zg16'),
+  Enteroendocrine_cells = c('Chga','Neurog3','Chgb','Tac1','Tph1'),
+  Tuft_cells = c('Dclk1','Trpm5','Avil','Lrmp'),
+  Enterocyte = c("Aldob", "Apoa1", "Apoa4", "Gsta1","Fabp1", "Prap1"),
+  T_cells = c('Cd3g','Cd4','Cd8a','Tcrg-C1','Tcrg-C2','Tcrg-C4','Gzma','Gzmb'),
+  B_cells = c('Cd79a','Jchain','Igha','Igkc'))
+
+markers <- map(markers, \(x) x[x %in% rownames(seurat)])
+
+# featureplot
+max_len <- map_vec(markers, ~ length(.x)) %>% max()
+map2(markers, names(markers), \(x, y) {
+  p_text <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold',
+                        label = stringr::str_to_title(gsub('_', ' ', y))) + 
+                   theme_void())
+  
+  p_feats <- map(x, ~ FeaturePlot(seurat, reduction = 'tsne', features = .x) +
+                   theme(aspect.ratio = 1))
+  
+  p_void <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold') + 
+                   theme_void())
+  
+  cowplot::plot_grid(plotlist = c(p_text, p_feats, rep(p_void, times = max_len - length(x))),
+                     nrow = 1) } ) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', ncol = 1)
+ggsave('tsne.featureplot.jpg', width = 4 * max_len + 4, height = 4 * length(markers))
+
+seurat <- SetIdent(seurat, value = 'RNA_snn_res.1.4')
+DimPlot(seurat, reduction = 'tsne', label = T, alpha = 1, raster = F) + 
+  NoLegend() + theme(aspect.ratio = 1)
+ggsave('tsne.SNN.1.4.dimplot.pdf', width = 6, height = 6)
+
+# 鉴定每个cluster中的marker
+allmarkers <- FindAllMarkers(seurat, only.pos = T, min.pct = 0.25, logfc.threshold = 0.25)
+saveRDS(allmarkers, 'allmarkers.clust.rds')
+write.xlsx(allmarkers, 'allmarkers.clust.xlsx')
+
+map(markers, ~ filter(allmarkers, gene %in% .x) ) %>% 
+  keep(~ nrow(.x) != 0) %>% 
+  map(~ group_by(.x, cluster) %>% 
+        group_modify(~ data.frame(match_n = nrow(.x), 
+                                  genes = paste(.x$gene, collapse = ",")))) %>% 
+  map2_df(names(.), ~ add_column(.x, gene = .y, .before = 1)) %>% 
+  data.frame() %>% 
+  arrange(cluster)
+
+# 疑难细胞群注释
+allmarkers %>% 
+  filter(p_val_adj < 0.01 & cluster == '21') %>% 
+  pull() %>% 
+  scRNA_marker_match(tissue = 'intestine', org = 'mouse') %>% 
+  select(-species, -tissue, -cell, -gene) %>% 
+  filter(grepl('intestine', item)) %>% 
+  data.frame() %>% 
+  head(10)
+
+seurat <- RenameIdents(seurat, 
+                       '0' = 'Stem_cells', '1' = 'Transit_amplifying_cells', '2' = 'Enterocyte', 
+                       '3' = 'Stem_cells', '4' = 'Stem_cells', '5' = 'Transit_amplifying_cells',
+                       '6' = 'Paneth_cells', '7' = 'Enterocyte', '8' = 'Paneth_cells', 
+                       '9' = 'Transit_amplifying_cells', '10' = 'Goblet_cells', '11' = 'T_cells',
+                       '12' = 'Paneth_cells', '13' = 'Paneth_cells', '14' = 'T_cells', 
+                       '15' = 'Tuft_cells', '16' = 'Goblet_cells', '17' = 'Enterocyte',
+                       '18' = 'Goblet_cells', '19' = 'Goblet_cells', '20' = 'T_cells', 
+                       '21' = 'Enteroendocrine_cells', '22' = 'Macrophage', '23' = 'Goblet_cells',
+                       '24' = 'B_cells', '25' = 'T_cells', '26' = 'Enteroendocrine_cells',
+                       '27' = 'Macrophage')
+
+# 可视化
+DimPlot(seurat, reduction = 'tsne', label = T, alpha = 1, cols = 'Set3') + 
+  theme(aspect.ratio = 1) + NoLegend()
+ggsave('tsne.marker.dimplot.pdf', width = 6, height = 6)
+
+DimPlot(seurat, reduction = 'tsne', label = T, alpha = 1, group.by = 'orig.ident') + 
+  theme(aspect.ratio = 1)
+ggsave('tsne.marker.dimplot.color_by_group.pdf', width = 6, height = 5)
+
+DimPlot(seurat, reduction = 'tsne', label = T, alpha = 1, split.by = 'orig.ident', 
+        cols = 'Set3', label.size = 3) + theme(aspect.ratio = 1)
+ggsave('tsne.marker.dimplot.facet_by_group.pdf', width = 10, height = 5)
+
+# 细胞组成，堆叠柱状图
+seurat@meta.data %>% 
+  dplyr::select(group = orig.ident) %>% 
+  add_column(cells = Idents(seurat)) %>% 
+  group_by(group, cells) %>% 
+  summarise(value = n()) %>% 
+  group_modify(~.x %>% mutate(prec = value / sum(value) * 100)) %>% 
+  ungroup %>% 
+  ggbarplot('group', 'prec', fill = 'cells', palette = 'Set3', xlab = '',
+            ylab = 'Cell Proporation (%)', width = .7, legend = 'right')
+ggsave('cell.percent.barplot.pdf', width = 5, height = 5)
+
+# 细胞数量
+seurat@meta.data %>% 
+  dplyr::select(group = orig.ident) %>% 
+  add_column(cells = Idents(seurat)) %>% 
+  group_by(group, cells) %>% 
+  summarise(n = n()) %>% 
+  ungroup %>% 
+  ggbarplot('group', 'n', fill = 'cells', position = position_dodge(width = .9), 
+            label = T, palette = 'Set3', ylab = 'Number of cells', xlab = '') +
+  scale_x_discrete(expand = c(.5, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(aspect.ratio = 1/2)
+ggsave('cell.count.barplot.pdf', width = 7, height = 4.5)
+
+allmarkers <- FindAllMarkers(seurat, only.pos = T, min.pct = 0.25, logfc.threshold = 0.25)
+saveRDS(allmarkers, 'allmarkers.cells.rds')
+write.xlsx(allmarkers, 'allmarkers.cells.xlsx')
+
+saveRDS(seurat, 'seurat.out.rds')
+
+#### 差异分析 ####
+pacman::p_load(org.Mm.eg.db, clusterProfiler, BiocParallel, enrichplot)
+register(SerialParam())
+
+cells <- levels(Idents(seurat))
+
+# 所有细胞类型差异分析
+diff <- map(cells, ~ FindMarkers(subset(seurat, idents = .x), ident.1 = 'PLA', 
+                                 ident.2 = 'PBS', group.by = 'orig.ident')) %>% 
+  set_names(nm = cells)
+saveRDS(diff, 'diff.genes.rds')
+
+diff_out <- map(cells, ~ rownames_to_column(diff[[.x]], 'name') ) %>% 
+  set_names(cells)
+write.xlsx(diff_out, 'diff.genes.xlsx')
+
+#### GSEA KEGG 富集分析和气泡图 ####
+gene_info <- AnnotationDbi::select(org.Mm.eg.db, keys(org.Mm.eg.db), 
+                                   keytype = 'ENTREZID', columns = c('SYMBOL'))
+
+gseKEGG <- map(diff, ~ .x %>% 
+                 mutate(ENTREZID = gene_info$ENTREZID[match(rownames(.), gene_info$SYMBOL)]) %>%
+                 filter(!is.na(ENTREZID)) %>% 
+                 pull(avg_log2FC, name = ENTREZID) %>% 
+                 sort(decreasing = T) %>% 
+                 gseKEGG(organism = 'mmu', pvalueCutoff = 1) %>% 
+                 data.frame )
+write.xlsx(gseKEGG, 'diff.genes.gseKEGG.xlsx')
+
+# 气泡图
+kegg <- read.delim('/database/KEGG/map/br08901.tsv') %>% 
+  mutate(lvC = gsub('map', 'mmu', lvC))
+
+colors <- c('Cellular Processes' = '#66c2a5',
+            'Environmental Information Processing' = '#fc8d62',
+            'Genetic Information Processing' = '#8da0cb',
+            'Metabolism' = '#e78ac3',
+            'Organismal Systems' = '#A6D854')
+
+plot_data <- map_df(cells, \(x)
+                    dplyr::filter(data.frame(gseKEGG[[x]])) %>% 
+                      dplyr::select(name = Description, id = ID, NES, pvalue) %>% 
+                      data.frame(row.names = NULL) %>% 
+                      add_column(cell = x)
+) %>% 
+  left_join(kegg, by = c('id' = 'lvC')) %>% 
+  mutate(name = gsub(' - Mus.*', '', name)) %>% 
+  filter(lvA %in% c('Metabolism','Genetic Information Processing',
+                    'Environmental Information Processing', 'Cellular Processes',
+                    'Organismal Systems')) %>% 
+  arrange(lvA) %>% 
+  mutate(name = factor(name, unique(name)),
+         color = colors[lvA],
+         name = glue::glue('<p style="color:{color}">{name} </p>') ) %>% 
+  mutate(cell = factor(cell, cells)) %>% 
+  mutate(plab = ifelse(pvalue < 0.05, 'sign', 'non-sign'))
+
+names <- dplyr::select(plot_data, name, plab) %>% 
+  group_by(name, plab) %>% 
+  summarise(n = n()) %>% 
+  filter(plab == 'non-sign' & n == 8) %>% 
+  pull(1)
+
+plot_data <- filter(plot_data, !name %in% names)
+
+ggscatter(plot_data, 'cell', 'name', fill = 'NES', shape = 21, 
+          color = 'plab', xlab = '', ylab = '') +
+  scale_fill_gradient2(high = '#d53e4f', mid = '#ffffbf', low = '#3288bd') +
+  scale_color_manual(values = c('sign' = 'red', 'non-sign' = '#ffffff')) +
+  scale_size_continuous(range = c(1, 9)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 6),
+        axis.text.y = ggtext::element_markdown(size = 6),
+        panel.spacing.x = unit(0, 'cm'),
+        panel.grid = element_line(linewidth = .3, linetype = 'dashed'))
+ggsave('diff.genes.gseKEGG.pdf', width = 6, height = 28)
+
+#### ORA KEGG 富集分析 ####
+# total genes
+eKEGG <- map(diff, ~ .x %>%
+               mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+               filter(p_val_adj < .05 & abs(avg_log2FC) > .25) %>% 
+               pull(ENTREZID) %>% 
+               na.omit %>% 
+               enrichKEGG(organism = 'hsa', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+               data.frame ) %>% 
+  keep(~ nrow(.) != 0)
+write.xlsx(eKEGG, 'diff.genes.eKEGG_all_gene.xlsx')
+
+# up genes
+eKEGG <- map(diff, ~ .x %>%
+               mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+               filter(p_val_adj < .05 & avg_log2FC > .25) %>% 
+               pull(ENTREZID) %>% 
+               na.omit %>% 
+               enrichKEGG(organism = 'hsa', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+               data.frame ) %>% 
+  keep(~ nrow(.) != 0)
+write.xlsx(eKEGG, 'diff.genes.eKEGG.up_gene.xlsx')
+
+# down genes
+eKEGG <- map(diff, ~ .x %>%
+               mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>%
+               filter(p_val_adj < .05 & avg_log2FC < -.25) %>% 
+               pull(ENTREZID) %>% 
+               na.omit %>% 
+               enrichKEGG(organism = 'hsa', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+               data.frame )
+write.xlsx(eKEGG, 'diff.genes.eKEGG.down_gene.xlsx')
+
+#### ORA GO 富集分析 ####
+# total genes
+eGO <- map(diff, ~ filter(.x, p_val_adj < .05 & abs(avg_log2FC) > .25) %>% 
+             pull(name) %>% 
+             enrichGO(OrgDb = 'org.Hs.eg.db', keyType = 'SYMBOL',
+                      pvalueCutoff = 1, qvalueCutoff = 1, ont = 'ALL') %>% 
+             data.frame ) %>% 
+  keep(~ nrow(.) != 0)
+write.xlsx(eGO, 'diff.genes.eGO.all_gene.xlsx')
+
+# up genes
+eGO <- map(diff, ~ filter(.x, p_val_adj < .05 & avg_log2FC > .25) %>% 
+             pull(name) %>% 
+             na.omit %>% 
+             enrichGO(OrgDb = 'org.Hs.eg.db', keyType = 'SYMBOL',
+                      pvalueCutoff = 1, qvalueCutoff = 1, ont = 'ALL') %>% 
+             data.frame ) %>% 
+  keep(~ nrow(.) != 0)
+write.xlsx(eGO, 'diff.genes.eGO.up_gene.xlsx')
+
+# down genes
+eGO <- map(diff, ~ filter(.x, p_val_adj < .05 & avg_log2FC < -.25) %>% 
+             pull(name) %>% 
+             na.omit %>% 
+             enrichGO(OrgDb = 'org.Hs.eg.db', keyType = 'SYMBOL',
+                      pvalueCutoff = 1, qvalueCutoff = 1, ont = 'ALL') %>% 
+             data.frame ) %>% 
+  keep(~ nrow(.) != 0)
+write.xlsx(eGO, 'diff.genes.eGO.down_gene.xlsx')
+
+#### Lgr5+细胞 比例 ####
+FetchData(seurat, vars = 'Lgr5') %>% 
+  add_column(group = seurat$orig.ident) %>% 
+  add_column(cell = seurat@active.ident) %>% 
+  filter(cell == 'Stem_cells') %>% 
+  mutate(Lgr5 = ifelse(Lgr5 > 0, 1, 0)) %>% 
+  count(Lgr5, group) %>% 
+  pull(n) %>% 
+  matrix(nrow = 2) %>% 
+  rstatix::chisq_test()
+```

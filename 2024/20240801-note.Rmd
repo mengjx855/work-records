@@ -1,0 +1,114 @@
+---
+title: "CD Homo feces 16S amplicon analysis"
+author: "Jinxin Meng"
+date: "2024-08-01"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## BC abundance comparison
+
+```{R}
+source('/code/R_func/taxa.R')
+
+profile <- read.delim('profile_g.tsv', row.names = 1, check.names = F) %>% 
+  profile_transRA()
+group <- read.delim('group.tsv') %>% 
+  select(sample, group = group2)
+plot_data <- profile %>% 
+  filter(rownames(.) %in% 'g__Blautia') %>% 
+  t() %>% data.frame() %>% 
+  dplyr::rename(value = 1) %>% 
+  rownames_to_column('sample') %>% 
+  left_join(group, by = 'sample') %>%
+  mutate(group = factor(group, c('Control', 'CD')))
+
+ggviolin(plot_data, 'group', 'value', color = 'group', legend = 'none', xlab = '', 
+         size = 1, width = .6, ylab = 'Relative abundance(%)', 
+         palette = c('#69a7bc','#E69F00','#f08178'), outlier.shape = NA) +
+  geom_boxplot(aes(color = group), width = .1, size = 1, outlier.shape = NA) + 
+  lims(y = c(NA, 31)) +
+  geom_jitter(aes(color = group), width = .2) +
+  stat_compare_means(comparisons = list(c('CD', 'Control')), label = 'p.label',
+                     label.y = 27, tip.length = .01, step.increase = .02, 
+                     vjust = .2, size = 3)
+ggsave('Blautia.rela_ab.pdf', width = 3, height = 4)
+```
+
+## difference analysis
+
+```{R}
+source('/code/R_func/calcu_difference.R')
+diff <- difference_analysis(profile, group, comparison = c('CD', 'Control'))
+write.xlsx(diff, 'diff_genus.xlsx')
+```
+
+## randomforest + ROC
+
+```{R}
+source('/code/R_func/model_randomforest.R')
+source('/code/R_func/plot_roc.R')
+
+profile <- read.delim('profile_g.tsv', row.names = 1, check.names = F) %>% 
+  profile_transRA()
+group <- read.delim('group.tsv') %>% 
+  select(sample, group = group2)
+
+pred <- rf_loom(profile, group, seed = 2024, ntree = 1000)
+pred <- left_join(pred, group, by = 'sample')
+roc <- roc(pred$group, pred$CD)
+plot_roc(roc, plot_se = T)
+ggsave('rf.roc.plot.pdf', width = 4, height = 4)
+
+diff <- read.xlsx('diff_genus.xlsx') %>% 
+  mutate(enriched = ifelse(abund1 < abund2 , 'Control', 'CD'))
+
+data <- rf_importance(profile, group, seed = 2023, ntree = 1000)
+
+left_join(data, diff, by = 'name') %>% 
+  write.xlsx('rf.importance.xlsx')
+
+left_join(data, diff, by = 'name') %>% head(10) %>% 
+  ggbarplot('name', 'MeanDecreaseAccuracy', fill = 'enriched', rotate = T, 
+            sort.val = 'asc', sort.by.groups = F, width = .6, 
+            palette = c('Control' = '#69a7bc', 'CD' = '#E69F00'))
+ggsave('rf.importance.pdf', width = 5.5, height = 5)
+```
+
+## LEfSe analysis
+
+```{R}
+library(microeco)
+library(magrittr)
+
+profile <- read.delim('table_rarefied.tsv', row.names = 1, check.names = F) %>%
+  profile_transRA()
+group <- read.delim('group.tsv', row.names = 1) %>% dplyr::select(group = group2)
+taxa <- read.delim('taxonomy.tsv', row.names = 1)
+tr <- read.tree('tree.nwk')
+
+set.seed(2024)
+taxa %<>% tidy_taxonomy
+
+dataset <- microtable$new(sample_table = group, otu_table = profile, 
+                          tax_table = taxa, phylo_tree = tr)
+lefse <- trans_diff$new(dataset = dataset, method = 'lefse', group = 'group', 
+                        alpha = 0.05)
+
+lefse$plot_diff_bar(use_number = 1:30, width = 0.6, group_order = c('Control', 'CD'), 
+                    color_values = c('#69a7bc','#E69F00'))
+ggsave('lefse.bar.pdf', width = 8, height = 10)
+
+lefse$plot_diff_cladogram(use_taxa_num = 100, use_feature_num = 30, clade_label_level = 4,
+                          group_order = c('Control','IBD'), color = c('#69a7bc','#E69F00'))
+ggsave('lefse.cladogram.pdf', width = 10, height = 8)
+
+use_labels <- c('p__Proteobacteria', 'p__Bacteroidetes', 'p__Acidobacteria', 'p__Firmicutes')
+lefse$plot_diff_cladogram(use_taxa_num = 200, use_feature_num = 50, select_show_labels = use_labels)
+```

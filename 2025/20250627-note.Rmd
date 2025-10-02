@@ -1,0 +1,89 @@
+---
+title: "scRNASeq SFTS Homo PBMC in public datasets LiJL - IDO / AHR"
+author: "Jinxin Meng"
+date: "2025-06-27"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## LiH_2021
+
+```{R}
+diff <- readRDS('/project/20240821_SFTSV_ATRA/scRNA_STFS_pubs/LiH_2021/analysis/diff/allcell.diff.rds')
+
+data <- map_df(names(diff), \(x) 
+       map_df(c('RS', 'AS', 'AD'), \(y) {
+         rownames_to_column(diff[[x]][[y]], 'name') %>% 
+           filter(name %in% c('IDO1', 'AHR')) %>%
+           add_column(cell = x, comparison = paste0(y, '_vs_HC'))
+         } ) )
+write.xlsx(data, 'LiH_2021.IDO1_AHR.xlsx')
+
+plot_data <- select(data, name, log2FC = avg_log2FC, padj = p_val_adj, cell, comparison) %>% 
+  add_plab('padj', format = 2) %>% 
+  mutate(label = paste0(ifelse(log2FC > 0, '+', '-'), '\n', plab)) %>% 
+  select(-padj, -plab) %>% 
+  spread('comparison', 'log2FC', fill = 0) %>% 
+  gather('comparison', 'log2FC', -label, -cell, -name)
+  
+ggplot(plot_data, aes(comparison, cell)) +
+  geom_tile(aes(fill = log2FC, width = 1, height = 1), color = '#ffffff',
+            linewidth = 1) +
+  geom_text(aes(label = label, lineheight = .8)) +
+  facet_grid(cols = vars(name)) +
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0)) +
+  scale_fill_gradient2(low = '#619CFF', mid = '#ffffff', high = '#F8766D') +
+  labs(x = '', y = '', title = 'LiH_2021 dataset') +
+  coord_fixed() +
+  theme_linedraw() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        axis.text = element_text(color = '#000000', size = 12),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank())
+ggsave('LiH_2021.IDO1_AHR.pdf', width = 7, height = 7)
+```
+
+## ParkA_2021
+
+```{R}
+diff <- readRDS('/project/20240821_SFTSV_ATRA/scRNA_STFS_pubs/ParkA_2021/analysis/diff/diff.rds')
+
+data <- map_df(names(diff), \(x) 
+               map_df(c('Recovery', 'Infection', 'Fatal'), \(y) {
+                 rownames_to_column(diff[[x]][[y]], 'name') %>% 
+                   filter(name %in% c('IDO1', 'AHR')) %>%
+                   add_column(cell = x, comparison = paste0(y, '_vs_HC'))
+               } ) )
+write.xlsx(data, 'ParkA_2021.IDO1_AHR.xlsx')
+
+plot_data <- select(data, name, log2FC = avg_log2FC, padj = p_val_adj, cell, comparison) %>% 
+  add_plab('padj', format = 2) %>% 
+  mutate(label = paste0(ifelse(log2FC > 0, '+', '-'), '\n', plab)) %>% 
+  select(-padj, -plab) %>% 
+  spread('comparison', 'log2FC', fill = 0) %>% 
+  gather('comparison', 'log2FC', -label, -cell, -name)
+
+ggplot(plot_data, aes(comparison, cell)) +
+  geom_tile(aes(fill = log2FC, width = 1, height = 1), color = '#ffffff',
+            linewidth = 1) +
+  geom_text(aes(label = label, lineheight = .8)) +
+  facet_grid(cols = vars(name)) +
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0)) +
+  scale_fill_gradient2(low = '#619CFF', mid = '#ffffff', high = '#F8766D') +
+  labs(x = '', y = '', title = 'ParkA_2021 dataset') +
+  coord_fixed() +
+  theme_linedraw() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        axis.text = element_text(color = '#000000', size = 12),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank())
+ggsave('ParkA_2021.IDO1_AHR.pdf', width = 6, height = 4.8)
+```

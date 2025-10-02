@@ -1,0 +1,80 @@
+---
+title: "RNASeq SFTS Mus Liver LiJL - ketone metabolism"
+author: "Jinxin Meng"
+date: "2025-05-26"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## RNASeq analysis ketone metabolism
+
+```{R}
+#### ketone metabolism ####
+eGOs <- readRDS('eGOs.rds') %>% 
+  map2_dfr(names(.), ~ 
+             filter(.x, grepl('ketone', Description) & pvalue < 0.05) %>% 
+             add_column(comparison = .y, .before = 1) ) %>% 
+  data.frame(row.names = NULL)
+write.xlsx(eGOs, 'ketone.eGOs.xlsx')
+  
+gseGOs <- readRDS('gseGOs.rds') %>% 
+  map2_dfr(names(.), ~ filter(.x, grepl('ketone', Description) & pvalue < 0.05) %>% 
+             add_column(comparison = .y, .before = 1) ) %>% 
+  data.frame(row.names = NULL)
+write.xlsx(eGOs, 'ketone.eGOs.xlsx')
+
+# key gene expression
+genes <- c('Hmgcs2', 'Hmgcl', 'Bdh1', 'Slc16a1', 'Oxct1', 'Slc16a7')
+
+profile_fpkm <- read.delim('../data/profile_fpkm.tsv', row.names = 1)
+
+data <- profile_fpkm[genes,] %>% 
+  profile_transLOG10() %>%
+  rownames_to_column('name') %>% 
+  gather('sample', 'value', -name) %>% 
+  left_join(group, by = 'sample') %>% 
+  mutate(dpi = as.factor(dpi))
+
+group_by(data, name, group) %>% 
+  shapiro_test(value) %>% 
+  data.frame() %>% 
+  arrange(p) %>% 
+  head()
+
+split(data, data$name) %>% 
+  map(~ bartlett.test(value ~ group, .x)$p.value)
+
+map(genes, ~ {
+  plot_data <- filter(data, name == .x)
+  
+  comparisons <- t_test(plot_data, value ~ dpi, var.equal = F) %>% 
+    filter(p < 0.05) %>% 
+    dplyr::select(group1, group2) %>% 
+    pmap(~ c(..1, ..2))
+  
+  ggerrorplot(plot_data, 'dpi', 'value', color = 'dpi', desc_stat = 'mean_sd',
+              add = 'mean', add.params = list(shape = 21, size = 1),
+              error.plot = 'errorbar', width = .2, size = .5,
+              palette = c('#bab0ac','#197ec0','#4dbbd5','#00a087','#91d1c2','#d5e4a2'),
+              legend = 'none', ylab = 'FPKM', title = .x) +
+    geom_jitter(aes(dpi, value, color = dpi), width = .25) +
+    geom_smooth(aes(dpi, value), mutate(plot_data, dpi = as.numeric(dpi)), 
+                inherit.aes = F, alpha = .2, linewidth = 1) +
+    stat_compare_means(comparisons = comparisons, size = 4, label = 'p.signif', 
+                       tip.length = .02, vjust = .8, hide.ns = T, method = 't', 
+                       step.increase = .05, method.args = list(var.equal = F)) +
+    scale_x_discrete(expand = c(.01, 0)) +
+    theme_test() +
+    theme(plot.title = element_text(face = 'italic', hjust = .5),
+          axis.ticks.length = unit(2, 'mm'),
+          axis.text = element_text(size = 12, color = '#000000'),
+          legend.position = 'none') }) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', nrow = 3)
+ggsave('ketone_gene_exp.lineplot.pdf', width = 9, height = 10)
+```

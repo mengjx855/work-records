@@ -1,0 +1,364 @@
+---
+title: "RNASeq SFTS Mus Liver LiJL"
+author: "Jinxin Meng"
+date: "2025-04-29"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## Pipeline
+
+```{bash}
+#### run_fastp.sh ####
+#!/usr/bin/bash
+
+( [ $# -ne 2 ] ) &&  { echo -e "Usage: $0 [fq|fq1,fq2] [out_prefix]" && exit 2; }
+
+fq=$1; out=$2; trds=16
+( [ ! -d ${out%%/*} ] ) && mkdir -p ${out%%/*}
+( [ -f $out.log ] ) && { echo -e "Skip sample: ${out##*/} .." && exit 0; }
+
+if [[ $fq =~ "," ]];then
+    fq1=$(echo $fq | cut -d "," -f1)
+    fq2=$(echo $fq | cut -d "," -f2)
+    fastp -w $trds -q 20 -u 30 -n 5 -y -Y 30 -l 80 --trim_poly_g -i $fq1 -I $fq2 -o $out.1.fq.gz -O $out.2.fq.gz \
+        -h /dev/null -j /dev/dell 1>$out.log 2>$out.log || { rm $out.* && exit 2; } 
+else
+    fastp -w $trds -q 20 -u 30 -n 5 -y -Y 30 -l 80 --trim_poly_g -i $fq -o $out.fq.gz \
+        -h /dev/null -j /dev/null 1>$out.log 2>$out.log || { rm $out.* && exit 2; }
+fi
+chmod 444 $out.*
+
+#### run_hisat2.sh ####
+#!/usr/bin/bash
+
+if [ $# -lt 3 ];then
+    echo "Usage: $0 [fq|fq1,fq2] [index] [out_prefix]"
+    echo -e "\e[1;31mExample:\e[0m\n single-end: ${0##*/} prefix.fq.gz index prefix\n pair-end: ${0##*/} prefix_1.fq.gz,prefix_2.fq.gz index prefix"
+    echo -e "\e[1;31mavailable hisat2 index:\e[0m"
+    echo -e "1. Mus_musculus.GRCm39.110: /data/database/hisat2/grcm39_tran-r110/grcm39"
+    echo -e "2. Homo_sapiens.GRCh38.110: /data/database/hisat2/grch38_tran-r110/grch38"
+    exit 127
+fi
+
+fq=$1; index=$2; out=$3; trds=16
+
+( [ -f $out.log ] && grep -q 'overall' $out.log ) && { echo -e "Skip sample: ${3##*/} .." && exit 0; }
+
+if [[ $fq =~ "," ]];then
+    fq1=$(echo $fq | cut -d "," -f1)
+    fq2=$(echo $fq | cut -d "," -f2)
+    hisat2 -p $trds -x $index -1 $fq1 -2 $fq2 2>$out.log |\
+        samtools view -@ $trds -bS |\
+        samtools sort -@ $trds -o $out.sort.bam - >/dev/null 2>/dev/null
+else
+    hisat2 -p $trds -x $index -U $fq 2>$out.log |\
+        samtools view -@ $trds -bS |\
+        samtools sort -@ $trds -o $out.sort.bam - >/dev/null 2>/dev/null
+fi
+
+chmod 444 $out.log $out.sort.bam
+
+#### pipeline ####
+cat raw_fq.filelist | parallel -j 6 --colsep="\t" run_fastp.sh {2} clean_fq/{1}
+cat clean_fq.filelist | parallel -j 7 --colsep="\t" run_hisat2.sh {2} /data/database/hisat2/grcm39_tran-r110/grcm39 hisat2/{1}
+cut -f1 clean_fq.filelist | parallel -j 6 stringtie -p 24 -o stringtie/{}.gtf -e -A stringtie/{}.tsv -G /data/database/hisat2/grcm39_tran-r110/Mus_musculus.GRCm39.110.gtf hisat2/{}.sort.bam
+prepDE.py3 -i stringtie.filelist -g stringtie.g_rc.csv -t stringtie.t_rc.csv
+getFPKM.py3 -i stringtie.filelist -g stringtie.g_fpkm.csv -t stringtie.t_fpkm.csv
+getTPM.py3 -i stringtie.filelist -g stringtie.g_tpm.csv -t stringtie.t_tpm.csv
+```
+
+## RNASeq analysis
+
+```{R}
+#### data filter ####
+# library(org.Mm.eg.db)
+
+# rc
+# profile_rc <- read.delim('../data/raw_profile_rc.tsv', row.names = 1)
+# 
+# gene_info <- AnnotationDbi::select(org.Mm.eg.db, keys = rownames(profile_rc),
+#                                    keytype = 'ENSEMBL', columns = c('SYMBOL'))
+# 
+# profile_rc <- profile_rc %>%
+#   mutate(name = gene_info$SYMBOL[match(rownames(.), gene_info$ENSEMBL)]) %>%
+#   aggregate(. ~ name, ., sum) %>%
+#   column_to_rownames('name')
+# profile_rc <- profile_rc[rowSums(profile_rc > 2) > 10, ]
+# profile_rc %>%
+#   rownames_to_column('name') %>%
+#   write.table('../data/profile_rc.tsv', sep = '\t', quote = F, row.names = F)
+
+# fpkm
+# profile_fpkm <- read.delim('../data/raw_profile_fpkm.tsv', row.names = 1)
+# profile_fpkm <- profile_fpkm %>%
+#   mutate(name = gene_info$SYMBOL[match(rownames(.), gene_info$ENSEMBL)]) %>%
+#   aggregate(. ~ name, ., sum) %>%
+#   column_to_rownames('name')
+# profile_fpkm <- profile_fpkm[rownames(profile_rc),] %>%
+#   rownames_to_column('name')
+# write.table(profile_fpkm, '../data/profile_fpkm.tsv', sep = '\t', quote = F, row.names = F)
+
+#### info ####
+group_level <- c('SFTS_3dpi','SFTS_4dpi','SFTS_5dpi','SFTS_6dpi','SFTS_8dpi','mock')
+group_color <- structure(c('#197ec0','#4dbbd5','#00a087',
+                           '#91d1c2','#d5e4a2','#bab0ac'),
+                         names = group_level)
+
+group <- read.delim('../data/group.tsv') %>% 
+  mutate(group = ifelse(sample == 'SFTS_5dpi_E19', 'SFTS_4dpi', group),
+         dpi = ifelse(sample == 'SFTS_5dpi_E19', 4, dpi))
+
+profile_rc <- read.delim('../data/profile_rc.tsv', row.names = 1)
+profile_fpkm <- read.delim('../data/profile_fpkm.tsv', row.names = 1)
+
+#### PCA ####
+source('/Code/R_func/plot_PCA.R')
+
+p1 <- plot_PCA(profile_fpkm, group, label_size = 3, show_grid = T, 
+               conf_type = 'encircle', group_level = group_level, 
+               group_color = group_color, add_group_label = T)
+
+p2 <- plot_PCA(profile_fpkm, group, label_size = 2, show_grid = T, 
+               conf_type = 'encircle', group_level = group_level, show_legend = F, 
+               group_color = group_color, add_sample_label = T)
+
+cowplot::plot_grid(p1, p2, nrow = 1)
+ggsave('PCA.pdf', width = 10, height = 4)
+
+data <- profile_fpkm[names(sort(apply(profile_fpkm, 1, sd), decreasing = T))[1:500],]
+
+pdf('Heatmap.pdf', width = 5, height = 6)
+pheatmap(data, scale = 'row', show_rownames = F, show_row_dend = F, 
+         fontsize_col = 7)
+dev.off()
+
+pdf('hclust.pdf', width = 6, height = 5)
+plot(hclust(dist(scale(t(data)))), xlab = '', cex = .7)
+dev.off()
+
+## SFTS_5dpi_E19 样本 与 SFTS_4dpi 更接近；
+## 将该样本进行重新归类；
+## 批次效应不是很明显；
+
+#### diff ####
+metadata <- data.frame(row.names = colnames(profile_rc)) %>%
+  mutate(group = group$group[match(rownames(.), group$sample)],
+         group = factor(group, group_level))
+
+dds <- DESeqDataSetFromMatrix(countData = profile_rc, colData = metadata, 
+                              design = ~ group)
+des <- DESeq(dds)
+
+comparisons <- list('SFTS_3dpi_vs_mock'	= c('SFTS_3dpi','mock'),
+                    'SFTS_4dpi_vs_mock'	= c('SFTS_4dpi','mock'),
+                    'SFTS_5dpi_vs_mock'	= c('SFTS_5dpi','mock'),
+                    'SFTS_6dpi_vs_mock'	= c('SFTS_6dpi','mock'),
+                    'SFTS_8dpi_vs_mock'	= c('SFTS_8dpi','mock'),
+                    'SFTS_4dpi_vs_SFTS_3dpi' = c('SFTS_4dpi','SFTS_3dpi'),
+                    'SFTS_5dpi_vs_SFTS_4dpi' = c('SFTS_5dpi','SFTS_4dpi'),
+                    'SFTS_6dpi_vs_SFTS_5dpi' = c('SFTS_6dpi','SFTS_5dpi'),
+                    'SFTS_8dpi_vs_SFTS_6dpi' = c('SFTS_8dpi','SFTS_6dpi'),
+                    'SFTS_5dpi_vs_SFTS_3dpi' = c('SFTS_5dpi','SFTS_3dpi'),
+                    'SFTS_8dpi_vs_SFTS_5dpi' = c('SFTS_8dpi','SFTS_5dpi'))
+
+diffs <- map(comparisons, ~
+               data.frame(results(des, contrast = c('group', .x))) %>%
+               rownames_to_column('name') %>%
+               filter(!is.na(pvalue)) %>% 
+               mutate(enriched = ifelse(log2FoldChange > 1 & pvalue < 0.05, .x[1], 
+                                        ifelse(log2FoldChange < -1 & pvalue < 0.05,
+                                               .x[2], 'none')) )  ) %>% 
+  set_names(names(comparisons))
+
+saveRDS(diffs, 'diffs.rds')
+write.xlsx(diffs, 'diffs.xlsx')
+
+data <- map2_dfr(names(comparisons), comparisons, ~ 
+                   data.frame(comparison = .x,
+                              up = sum(diffs[[.x]]$enriched == .y[1]), 
+                              down = sum(diffs[[.x]]$enriched == .y[2]),
+                              none = sum(diffs[[.x]]$enriched == 'none')) )
+data %>% 
+  dplyr::select(-none) %>% 
+  gather('class', 'n', -comparison) %>% 
+  ggbarplot('comparison', 'n', fill = 'class', xlab = '', legend = 'right', 
+            legend.title = '', ylab = 'Number of differential\nabundance genes', 
+            palette = c('#5773cc','#ffb900'), x.text.angle = 45, label = .$n, 
+            lab.vjust = 1.2, lab.size = 3, width = .6,  alpha = .7, color = NA) +
+  theme(axis.ticks.length = unit(2, 'mm'))
+ggsave('diffs.statistics.pdf', width = 7, height = 5)
+
+#### ORA 富集分析 KEGG ####
+library(org.Mm.eg.db)
+gene_info <- AnnotationDbi::select(org.Mm.eg.db, keys = rownames(profile_rc), 
+                                   keytype = 'SYMBOL', columns = c('ENTREZID'))
+
+eKEGGs <- map(diffs, ~ filter(.x, enriched != 'none') %>% 
+                mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>% 
+                pull(ENTREZID) %>% 
+                na.omit %>% 
+                enrichKEGG(organism = 'mmu', pvalueCutoff = 1) %>% 
+                data.frame())
+saveRDS(eKEGGs, 'eKEGGs.rds')
+write.xlsx(eKEGGs, 'eKEGGs.xlsx')
+
+eKEGGs <- map2(diffs, map_vec(comparisons, ~ .x[1]), ~ 
+                 filter(.x, enriched == .y) %>%
+                 mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>% 
+                 pull(ENTREZID) %>% 
+                 na.omit %>% 
+                 enrichKEGG(organism = 'mmu', pvalueCutoff = 1) %>% 
+                 data.frame()) 
+saveRDS(eKEGGs, 'eKEGGs_up.rds')
+write.xlsx(eKEGGs, 'eKEGGs_up.xlsx')
+
+eKEGGs <- map2(diffs, map_vec(comparisons, ~ .x[2]), ~ 
+                 filter(.x, enriched == .y) %>%
+                 mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>% 
+                 pull(ENTREZID) %>% 
+                 na.omit %>% 
+                 enrichKEGG(organism = 'mmu', pvalueCutoff = 1) %>% 
+                 data.frame()) 
+saveRDS(eKEGGs, 'eKEGGs_down.rds')
+write.xlsx(eKEGGs, 'eKEGGs_down.xlsx')
+
+#### ORA 富集分析 GO ####
+eGOs <- map(diffs, ~ filter(.x, enriched != 'none') %>% 
+              pull(name) %>% 
+              enrichGO('org.Mm.eg.db', keyType = 'SYMBOL', 
+                       pvalueCutoff = 1, ont = 'ALL') %>% 
+              data.frame()) 
+saveRDS(eGOs, 'eGOs.rds')
+write.xlsx(eGOs, 'eGOs.xlsx')
+
+eGOs <- map2(diffs, map_vec(comparisons, ~ .x[1]), ~
+               filter(.x, enriched == .y) %>% 
+               pull(name) %>% 
+               enrichGO('org.Mm.eg.db', keyType = 'SYMBOL', 
+                        pvalueCutoff = 1, ont = 'ALL') %>% 
+               data.frame() )
+saveRDS(eGOs, 'eGOs_up.rds')
+write.xlsx(eGOs, 'eGOs_up.xlsx')
+
+eGOs <- map2(diffs, map_vec(comparisons, ~ .x[2]), ~
+               filter(.x, enriched == .y) %>% 
+               pull(name) %>% 
+               enrichGO('org.Mm.eg.db', keyType = 'SYMBOL', 
+                        pvalueCutoff = 1, ont = 'ALL') %>% 
+               data.frame() )
+saveRDS(eGOs, 'eGOs_down.rds')
+write.xlsx(eGOs, 'eGOs_down.xlsx')
+
+#### GSEA 富集分析 KEGG ####
+library(BiocParallel)
+register(SerialParam())
+
+gseKEGGs <- map(diffs, ~
+                  left_join(.x, gene_info, by = c('name' = 'SYMBOL')) %>%
+                  filter(!is.na(ENTREZID)) %>% 
+                  pull(log2FoldChange, name = ENTREZID) %>%
+                  sort(decreasing = T) %>% 
+                  gseKEGG(organism = 'mmu', pvalueCutoff = 1) %>% 
+                  data.frame())
+saveRDS(gseKEGGs, 'gseKEGGs.rds')
+write.xlsx(gseKEGGs, 'gseKEGGs.xlsx')
+
+#### GSEA 富集分析 GO ####
+gseGOs <- map(diffs, ~
+                pull(.x, log2FoldChange, name = name) %>%
+                sort(decreasing = T) %>% 
+                gseGO('org.Mm.eg.db', keyType = 'SYMBOL', 
+                      pvalueCutoff = 1, ont = 'ALL') %>% 
+                data.frame())
+saveRDS(gseGOs, 'gseGOs.rds')
+write.xlsx(gseGOs, 'gseGOs.xlsx')
+
+#### 趋势分析 ####
+library(Mfuzz)
+
+.colnames <- dplyr::select(group, group, dpi) %>% 
+  distinct() %>% 
+  arrange(dpi) %>% 
+  mutate(dpi = paste0('S', dpi)) %>% 
+  pull(dpi, name = group)
+
+data <- profile_smp2grp(profile_fpkm, group) %>% 
+  rename_with(~ .colnames) %>% 
+  as.matrix()
+
+# 构造mfuzz对象
+mfuzz <- new('ExpressionSet', exprs = data)
+
+# 预处理缺失值或者异常值
+mfuzz <- filter.NA(mfuzz, thres = 0.25)
+mfuzz <- fill.NA(mfuzz, mode = 'mean')
+mfuzz <- filter.std(mfuzz, min.std = 0)
+
+# 标准化数据
+mfuzz <- standardise(mfuzz)
+
+# Mfuzz基于fuzzy c-means的算法进行聚类
+# 需手动定义目标聚类群的个数，例如这里我们为了重现原作者的结果，设定为 10，即期望获得 10 组聚类群
+# 需要设定随机数种子，以避免再次运行时获得不同的结果
+set.seed(123)
+n = 25
+cluster <- mfuzz(mfuzz, c = n, m = mestimate(mfuzz))
+
+# # 提取所有基因所属的聚类群，并和它们的原始表达值整合在一起
+cluster_data <- data.frame(cluster =  cluster$cluster) %>% 
+  rownames_to_column('name')
+write.xlsx(cluster_data, 'mufzz.line.xlsx')
+
+# 如果您想提取数据分析过程中，标准化后的表达值（绘制曲线图用的那个值，而非原始基因表达值）
+plot_data <- data.frame(mfuzz@assayData$exprs, check.names = F) %>% 
+  rownames_to_column('name') %>% 
+  left_join(cluster_data, by = 'name')
+
+# 可视化
+plots <- map(1:n, ~ filter(plot_data, cluster == .x) %>% 
+               dplyr::select(-cluster) %>% 
+               gather('dpi', 'value', -name) %>% 
+               mutate(dpi = factor(dpi, .colnames)) %>%
+               ggline('dpi', 'value', color = 'name', legend = 'none', plot_type = 'l',
+                      xlab = '', ylab = 'scale FPKM', title = paste0("Gene cluster ", .x),
+                      palette = viridis::viridis(length(unique(.$name)))) +
+               scale_x_discrete(expand = c(.01, .01)) +
+               theme(aspect.ratio = .8, 
+                     axis.ticks.length = unit(2, 'mm')))
+
+cowplot::plot_grid(plotlist = plots, nrow = 5, ncol = 5)
+ggsave("mufzz.line.jpg", width = 23, height = 20)
+
+#### Cluster ORA 富集分析 KEGG ####
+library(org.Mm.eg.db)
+gene_info <- AnnotationDbi::select(org.Mm.eg.db, keys = rownames(profile_rc), 
+                                   keytype = 'SYMBOL', columns = c('ENTREZID'))
+
+eKEGGs <- map(1:25, ~ filter(cluster_data, cluster == .x) %>% 
+                mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>% 
+                pull(ENTREZID) %>% 
+                na.omit %>% 
+                enrichKEGG(organism = 'mmu', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+                data.frame()) %>% 
+  set_names(paste0('Cluster ', 1:25))
+saveRDS(eKEGGs, 'mufzz_eKEGGs.rds')
+write.xlsx(eKEGGs, 'mufzz_eKEGGs.xlsx')
+
+#### Cluster ORA 富集分析 GO ####
+eGOs <- map(1:25, ~ filter(cluster_data, cluster == .x) %>% 
+              pull(name) %>% 
+              enrichGO('org.Mm.eg.db', keyType = 'SYMBOL', 
+                       pvalueCutoff = 1, ont = 'ALL') %>% 
+              data.frame()) %>% 
+  set_names(paste0('Cluster ', 1:25))
+saveRDS(eGOs, 'mufzz_eGOs.rds')
+write.xlsx(eGOs, 'mufzz_eGOs.xlsx')
+
+```

@@ -1,0 +1,563 @@
+---
+title: "STFSV infection Home RNASeq re-analysis"
+author: "Jinxin Meng"
+date: "2024-11-14"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## LiS_2020 
+
+```{R}
+#### data ####
+gp_col <- c('Healthy' = '#8da0cb', 'Recover' = '#66c2a5', 'AcuteRecover' = '#fc8d62', 'AcuteDeceased' = '#e78ac3')
+
+group <- read.delim("../data/map.txt") %>% 
+  mutate(group = factor(group, names(gp_col)))
+
+profile <- read.delim("../data/profile.tsv", row.names = 1)
+profile <- profile[rowSums(profile > 2) >= 8, ] # 过滤基因表达谱，保证每个基因至少在20%样本以上的reads数大于2
+
+gene_info <- AnnotationDbi::select(org.Hs.eg.db, keys = rownames(profile), keytype = "ENTREZID", columns = c("SYMBOL")) 
+
+#### 差异分析 ####
+metadata <- data.frame(row.names = colnames(profile)) %>%
+  mutate(group = group$group[match(rownames(.), group$sample)],
+         group = factor(group))
+
+dds <- DESeqDataSetFromMatrix(countData = profile, colData = metadata, design = ~ group) # 构建dds对象
+des <- DESeq(dds)
+
+gps <- list(
+  c("group", "AcuteDeceased", "Healthy"), # 急性期 最后死亡
+  c("group", "AcuteRecover", "Healthy"), # 急性期 最后存活
+  c("group", "Recover", "Healthy"), # 恢复的
+  c("group", "Recover", "AcuteRecover"),
+  c("group", "AcuteDeceased", "AcuteRecover"))
+
+diff <- map(gps, \(x)
+            data.frame(results(des, contrast = x)) %>%
+              rownames_to_column(var = "name") %>% 
+              mutate(enriched = ifelse(log2FoldChange > 1 & pvalue < 0.05, x[2], 
+                                       ifelse(log2FoldChange < -1 & pvalue < 0.05, x[3], "none")))
+            ) %>% setNames(map_vec(gps, \(x) paste0(x[2:3], collapse = "_vs_")))
+openxlsx::write.xlsx(diff, 'diff/diff.xlsx')
+saveRDS(diff, "diff/diff.rds")
+
+#### GSEA 富集分析 KEGG ####
+library(BiocParallel)
+library(enrichplot)
+register(SerialParam())
+
+gseKEGG <- map(diff, \(x)
+               pull(x, log2FoldChange, name) %>%
+                 sort(decreasing = T) %>% 
+                 gseKEGG(organism = "hsa", pvalueCutoff = 1) %>% 
+                 data.frame())
+openxlsx::write.xlsx(gseKEGG, 'GSEA/gseKEGG.xlsx')
+saveRDS(gseKEGG, "GSEA/gseKEGG.rds")
+
+#### GSEA 富集分析 Cell ####
+# CellMarker
+library <- read.delim("../data/CellMarker_library.txt")
+gse <- map(diff, \(x) 
+           GSEA(structure(x$log2FoldChange, names = x$name) %>% sort(decreasing = T), 
+                TERM2GENE = library, pvalueCutoff = 1, maxGSSize = 1000, minGSSize = 3) %>% 
+             data.frame() )
+saveRDS(gse, "GSEA/gseCell_CellMarker.rds")
+openxlsx::write.xlsx(gse, "GSEA/gseCell_CellMarker.xlsx")
+
+# CellStar
+library <- read.delim("../data/CellStar_library.txt")
+gse <- map(diff, \(x) 
+           GSEA(structure(x$log2FoldChange, names = x$name) %>% sort(decreasing = T), 
+                TERM2GENE = library, pvalueCutoff = 1, maxGSSize = 1000, minGSSize = 3) %>% 
+             data.frame() )
+saveRDS(gse, "GSEA/gseCell_CellStar.rds")
+openxlsx::write.xlsx(gse, "GSEA/gseCell_CellStar.xlsx")
+
+#### ORA 富集分析 KEGG ####
+eKEGG <- map(diff, \(x)
+             filter(x, enriched != 'none') %>%
+               pull(name) %>% 
+               enrichKEGG(organism = 'hsa', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+               data.frame())
+openxlsx::write.xlsx(eKEGG, 'ORA/eKEGG.xlsx')
+saveRDS(eKEGG, 'ORA/eKEGG.rds')
+
+#### path展示 ####
+library(pathview)
+
+kegg_info <- download_KEGG("hsa")
+terms <- c('MAPK signaling pathway', 'Retinol metabolism', 'NF-kappa B signaling pathway',
+           'Toll-like receptor signaling pathway','B cell receptor signaling pathway',
+           'JAK-STAT signaling pathway','T cell receptor signaling pathway', 'PPAR signaling pathway',
+           'NOD-like receptor signaling pathway','RIG-I-like receptor signaling pathway')
+
+# fmt-1
+map(terms, \(x)
+    map(names(diff), \(y)
+        {
+          suffix <- paste0(gsub(" ", "_", x), ".", y)
+          path_id <- kegg_info$KEGGPATHID2NAME$from[kegg_info$KEGGPATHID2NAME$to == x]
+          data <- kegg_info$KEGGPATHID2EXTID %>% 
+            filter(from == path_id) %>% 
+            left_join(diff[[y]], by = c('to' = 'name')) %>% 
+            filter(!is.na(pvalue)) %>% 
+            filter(enriched != "none") %>% 
+            mutate(log2FoldChange = ifelse(log2FoldChange > 0, 3, -3))
+          gene <- structure(data$log2FoldChange, names = data$to)
+          try(pathview(gene.data = gene, pathway.id = path_id, species = "hsa", limit = list(gene = 3),
+                       out.suffix = paste0('fmt_1.', suffix), low = "#abd9e9", high = "#fdae61"))
+    } ) )
+
+# fmt-2
+map(terms, \(x)
+    map(names(diff), \(y)
+        {
+          suffix <- paste0(gsub(" ", "_", x), ".", y)
+          path_id <- kegg_info$KEGGPATHID2NAME$from[kegg_info$KEGGPATHID2NAME$to == x]
+          data <- kegg_info$KEGGPATHID2EXTID %>% 
+            filter(from == path_id) %>% 
+            left_join(diff[[y]], by = c("to" = "name")) %>% 
+            filter(!is.na(log2FoldChange))
+          gene <- structure(data$log2FoldChange, names = data$to)
+          try(pathview(gene.data = gene, pathway.id = path_id, species = "hsa", limit = list(gene = 3),
+                       out.suffix = paste0('fmt_2.', suffix), low = "#abd9e9", high = "#fdae61"))
+    } ) )
+
+#### 基因表达 ####
+fpkm <- read.delim("../data/profile_fpkm.tsv", row.names = 1)
+
+# 5468 | PPARG
+# 3725 | JUN
+# 2353 | FOS
+map2(c('5468','3725','2353'), c('PPARG','JUN','FOS'), \(x, y)
+     data.frame(t(fpkm[x,])) %>% 
+      dplyr::rename(value = 1) %>% 
+      rownames_to_column("sample") %>% 
+      left_join(group, by = "sample") %>% 
+      ggboxplot("group", "value", fill = "group", legend = "none", palette = gp_col, 
+                xlab = '', ylab = paste0('FPKM of ', y), width = .6) +
+      stat_compare_means(comparisons = list(c('AcuteRecover','Healthy'), c('AcuteDeceased','Healthy'), c('Recover','Healthy'), 
+                                            c('AcuteDeceased', 'AcuteRecover'), c('AcuteRecover', 'Recover')),
+                         label = "p.signif", method = "t", step.increase = .06, vjust = .8, tip.length = .02) +
+      theme(aspect.ratio = 1) 
+     ) %>% cowplot::plot_grid(plotlist = ., nrow = 1, align = 'v')
+ggsave("diff/gene.fpkm.boxplot.pdf", width = 15, height = 5)
+```
+
+## WangY_2021
+
+```{R}
+#### data ####
+gp <- c('SF', 'nonSF')
+gp_col <- c('SF' = '#fc8d62', 'nonSF' = '#8da0cb')
+
+group <- read.delim("../data/group.txt") %>% 
+  mutate(group = factor(group, gp))
+
+profile <- read.delim("../data/profile.txt") %>% 
+  aggregate(. ~ name, ., sum) %>% 
+  column_to_rownames('name')
+profile <- profile[rowSums(profile > 2) >= 3, ] # 过滤基因表达谱，保证每个基因至少在3样本以上的reads数大于2
+
+gene_info <- AnnotationDbi::select(org.Hs.eg.db, keys = rownames(profile), keytype = "ENSEMBL", columns = c('ENTREZID', "SYMBOL")) 
+
+#### fpkm ####
+source("/code/R_func/transform_rc.R")
+
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+gene_ranges <- genes(txdb) # 基因长度获取
+
+gene_length <- data.frame(ENTREZID = names(gene_ranges), length = width(gene_ranges)) %>%
+  right_join(gene_info, by = 'ENTREZID') %>% 
+  filter(!is.na(ENSEMBL)) %>% 
+  dplyr::select(name = ENSEMBL, len = length) %>% 
+  dplyr::group_by(name) %>% 
+  dplyr::slice_max(len, n = 1) %>% 
+  distinct()
+
+fpkm <- rc2fpkm(profile, gene_length) %>% 
+  na.omit() %>% 
+  mutate(name = gene_info$SYMBOL[match(rownames(.), gene_info$ENSEMBL)]) %>% 
+  aggregate(. ~ name, ., mean)
+write.table(fpkm, "../data/profile_fpkm.tsv", sep = "\t", quote = F, row.names = F)
+
+#### 差异分析 ####
+metadata <- data.frame(row.names = colnames(profile)) %>%
+  mutate(group = group$group[match(rownames(.), group$sample)],
+         group = factor(group))
+
+dds <- DESeqDataSetFromMatrix(countData = profile, colData = metadata, design = ~ group) # 构建dds对象
+des <- DESeq(dds)
+
+diff <- data.frame(results(des, contrast = c('group', gp))) %>% 
+  rownames_to_column(var = "name") %>% 
+  mutate(enriched = ifelse(log2FoldChange > 1 & pvalue < 0.05, gp[1], 
+                           ifelse(log2FoldChange < -1 & pvalue < 0.05, gp[2], "none")))
+openxlsx::write.xlsx(diff, 'diff/diff.xlsx')
+saveRDS(diff, "diff/diff.rds")
+
+#### GSEA 富集分析 KEGG ####
+library(BiocParallel)
+library(enrichplot)
+register(SerialParam())
+
+gseKEGG <- diff %>% 
+  left_join(gene_info, by = c('name' = 'ENSEMBL')) %>% 
+  pull(log2FoldChange, ENTREZID) %>%
+  sort(decreasing = T) %>% 
+  gseKEGG(organism = "hsa", pvalueCutoff = 1) %>% 
+  data.frame()
+openxlsx::write.xlsx(gseKEGG, 'GSEA/gseKEGG.xlsx')
+saveRDS(gseKEGG, "GSEA/gseKEGG.rds")
+
+#### ORA 富集分析 KEGG ####
+eKEGG <- diff %>% 
+  left_join(gene_info, by = c('name' = 'ENSEMBL')) %>% 
+  filter(enriched != 'none') %>%
+  pull(ENTREZID) %>% 
+  enrichKEGG(organism = 'hsa', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+  data.frame()
+openxlsx::write.xlsx(eKEGG, 'ORA/eKEGG.xlsx')
+saveRDS(eKEGG, 'ORA/eKEGG.rds')
+
+#### path展示 ####
+library(pathview)
+
+kegg_info <- download_KEGG("hsa")
+terms <- c('MAPK signaling pathway', 'Retinol metabolism', 'NF-kappa B signaling pathway',
+           'Toll-like receptor signaling pathway','B cell receptor signaling pathway',
+           'JAK-STAT signaling pathway','T cell receptor signaling pathway', 'PPAR signaling pathway',
+           'NOD-like receptor signaling pathway','RIG-I-like receptor signaling pathway')
+
+# fmt-1
+map(terms, \(x) {
+  suffix <- paste0(gsub(" ", "_", x))
+  path_id <- kegg_info$KEGGPATHID2NAME$from[kegg_info$KEGGPATHID2NAME$to == x]
+  data <- kegg_info$KEGGPATHID2EXTID %>% 
+    filter(from == path_id) %>% 
+    left_join(gene_info, by = c('to' = 'ENTREZID')) %>% 
+    left_join(diff, by = c('ENSEMBL' = 'name')) %>% 
+    filter(!is.na(pvalue)) %>% 
+    filter(enriched != "none") %>% 
+    mutate(log2FoldChange = ifelse(log2FoldChange > 0, 3, -3))
+  gene <- structure(data$log2FoldChange, names = data$to)
+  try(pathview(gene.data = gene, pathway.id = path_id, species = "hsa", limit = list(gene = 3),
+               out.suffix = paste0('fmt_1.', suffix), low = "#abd9e9", high = "#fdae61") )
+  } ) 
+
+# fmt-2
+map(terms, \(x) {
+  suffix <- paste0(gsub(" ", "_", x))
+  path_id <- kegg_info$KEGGPATHID2NAME$from[kegg_info$KEGGPATHID2NAME$to == x]
+  data <- kegg_info$KEGGPATHID2EXTID %>% 
+    filter(from == path_id) %>% 
+    left_join(gene_info, by = c('to' = 'ENTREZID')) %>% 
+    left_join(diff, by = c("ENSEMBL" = "name")) %>% 
+    filter(!is.na(log2FoldChange))
+  gene <- structure(data$log2FoldChange, names = data$to)
+  try(pathview(gene.data = gene, pathway.id = path_id, species = "hsa", limit = list(gene = 3),
+               out.suffix = paste0('fmt_2.', suffix), low = "#abd9e9", high = "#fdae61"))
+  } ) 
+
+
+#### 基因表达 ####
+fpkm <- read.delim("../data/profile_fpkm.tsv", row.names = 1)
+
+# 5468 | PPARG | ENSG00000132170
+# 3725 | JUN | ENSG00000177606
+# 2353 | FOS | ENSG00000170345
+map(c('PPARG','JUN','FOS'), \(x)
+    data.frame(t(fpkm[x,])) %>% 
+      dplyr::rename(value = 1) %>% 
+      rownames_to_column("sample") %>% 
+      left_join(group, by = "sample") %>% 
+      ggboxplot("group", "value", fill = "group", legend = "none", palette = gp_col, 
+                xlab = '', ylab = paste0('FPKM of ', x), width = .6) +
+      stat_compare_means(comparisons = list(gp), label = "p.signif", method = "t", 
+                         step.increase = .06, vjust = .8, tip.length = .02) +
+      theme(aspect.ratio = 1)
+    ) %>% cowplot::plot_grid(plotlist = ., nrow = 1, align = 'v')
+ggsave("diff/gene.fpkm.boxplot.pdf", width = 10, height = 3)
+```
+
+## ZhangY_2025
+
+```{R}
+# 服务器上跑的
+setwd("/share/data1/mjx/Rproj/tmp_2025/20250201_RNAseq_SFTS_patients_pub_ZhangY_2025/")
+pacman::p_load(tidyr, dplyr, tibble, purrr, ggpubr)
+library(limma) %>% suppressMessages()
+
+#### 差异分析 SFTS vs. HC ####
+grp <- c('HC', 'SFTS')
+grp_col <- c('HC' = '#66c2a5', 'SFTS' = '#fc8d62')
+
+group <- read.delim("group.txt")
+profile <- read.delim("profile_tpm.txt", row.names = 1)
+
+profile <- normalizeBetweenArrays(profile)
+design <- factor(group$group, grp)
+design <- model.matrix(~design)
+fit <- lmFit(profile, design)
+fit <- eBayes(fit)
+
+diff <- topTable(fit, coef = 'designSFTS', adjust = 'BH', number = Inf) %>% 
+  rownames_to_column(var = "name") %>% 
+  mutate(enriched = ifelse(logFC > 1 & P.Value < 0.05, grp[2], 
+                           ifelse(logFC < -1 & P.Value < 0.05, grp[1], "none")))
+
+openxlsx::write.xlsx(diff, 'diff_group.xlsx')
+saveRDS(diff, "diff_group.rds")
+
+#### 差异分析 severity ####
+grp <- c('HC', 'moderate', 'severe', 'fatal')
+grp_col <- c()
+
+group <- read.delim("group.txt")
+profile <- read.delim("profile_tpm.txt", row.names = 1)
+
+profile <- normalizeBetweenArrays(profile)
+
+design <- factor(group$severity, grp)
+design <- model.matrix(~design)
+colnames(design) <- sub('design', '', colnames(design))
+
+gps <- c('moderate', 'severe', 'fatal', 'severe-moderate', 'fatal-severe')
+gps_name <- map_vec(gps, \(x) ifelse(grepl('-', x), sub('-', '_vs_', x), sub('$', '_vs_HC', x)))
+
+contrasts <-makeContrasts(contrasts = gps, levels = design)
+
+fit <- lmFit(profile, design)
+fit <- contrasts.fit(fit, contrasts)
+fit <- eBayes(fit)
+
+
+diffs <- map2(gps, gps_name, \(x, y)
+             topTable(fit, coef = x, adjust='BH', number = Inf) %>% 
+               rownames_to_column(var = "name") %>% 
+               mutate(enriched = ifelse(logFC > 1 & P.Value < 0.05, 
+                                        unlist(str_split(y, '_vs_'))[1], 
+                                        ifelse(logFC < -1 & P.Value < 0.05, 
+                                               unlist(str_split(y, '_vs_'))[2], "none")))
+             ) %>% setNames(gps_name)
+
+openxlsx::write.xlsx(diffs, 'diffs_severity.xlsx')
+saveRDS(diffs, "diffs_severity.rds")
+
+sessionInfo()
+# R version 4.3.1 (2023-06-16)
+# Platform: x86_64-conda-linux-gnu (64-bit)
+# Running under: CentOS Linux 7 (Core)
+# Matrix products: default
+# BLAS/LAPACK: /share/data1/software/miniconda3/envs/rbase_4.3/lib/libopenblasp-r0.3.24.so;  LAPACK version 3.11.0
+# other attached packages:
+# [1] org.Hs.eg.db_3.17.0   AnnotationDbi_1.62.2  IRanges_2.34.1        S4Vectors_0.38.1     
+# [5] Biobase_2.60.0        BiocGenerics_0.46.0   clusterProfiler_4.8.3 ggbeeswarm_0.7.2     
+# [9] Hmisc_5.1-1           vegan_2.6-4           lattice_0.21-8        permute_0.9-7        
+# [13] stringr_1.5.0         gridExtra_2.3         gggenes_0.5.1         readxl_1.4.3         
+# [17] plyr_1.8.9            data.table_1.14.8     rstatix_0.7.2         limma_3.56.2         
+# [21] ggpubr_0.6.0          ggplot2_3.4.3         purrr_1.0.2           tidyr_1.3.0          
+# [25] tibble_3.2.1          dplyr_1.1.3   
+
+#### Win Jinxin Meng, 20250201, 20250201 ####
+setwd("F:/proj/20240821_SFTSV_ATRA/RNAseq_SFTS_patients_pub_ZhangY_2025/analysis/")
+pacman::p_load(tidyr, dplyr, tibble, purrr, ggpubr)
+library(clusterProfiler) %>% suppressMessages()
+library(org.Hs.eg.db) %>% suppressMessages()
+
+#### GSEA 富集分析 SFTS vs. HC ####
+library(BiocParallel)
+library(enrichplot)
+register(SerialParam())
+
+diff <- readRDS('diff_group.rds')
+
+gene_info <- AnnotationDbi::select(org.Hs.eg.db, diff$name, keytype = 'SYMBOL',
+                                   columns = c('ENTREZID'))
+
+gseKEGG <- diff %>% 
+  left_join(gene_info, by = c('name' = 'SYMBOL')) %>% 
+  pull(logFC, ENTREZID) %>% 
+  sort(decreasing = T) %>% 
+  gseKEGG(organism = "hsa", pvalueCutoff = 1) %>% 
+  data.frame()
+openxlsx::write.xlsx(gseKEGG, 'diff_group.gseKEGG.xlsx')
+saveRDS(gseKEGG, "diff_group.gseKEGG.rds")
+
+#### ORA 富集分析 SFTS vs. HC ####
+eKEGG <- diff %>% 
+  left_join(gene_info, by = c('name' = 'SYMBOL')) %>% 
+  filter(enriched != 'none') %>%
+  pull(ENTREZID) %>% 
+  enrichKEGG(organism = 'hsa', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+  data.frame()
+openxlsx::write.xlsx(eKEGG, 'diff_group.eKEGG.xlsx')
+saveRDS(eKEGG, 'diff_group.eKEGG.rds')
+
+#### path展示 SFTS vs. HC ####
+library(pathview)
+
+kegg_info <- download_KEGG("hsa")
+terms <- c('MAPK signaling pathway', 'Retinol metabolism', 'NF-kappa B signaling pathway',
+           'Toll-like receptor signaling pathway','B cell receptor signaling pathway',
+           'JAK-STAT signaling pathway','T cell receptor signaling pathway', 'PPAR signaling pathway',
+           'NOD-like receptor signaling pathway','RIG-I-like receptor signaling pathway')
+
+# fmt-1
+map(terms, \(x) {
+  suffix <- paste0(gsub(" ", "_", x))
+  path_id <- kegg_info$KEGGPATHID2NAME$from[kegg_info$KEGGPATHID2NAME$to == x]
+  data <- kegg_info$KEGGPATHID2EXTID %>% 
+    filter(from == path_id) %>% 
+    left_join(gene_info, by = c('to' = 'ENTREZID')) %>% 
+    left_join(diff, by = c('SYMBOL' = 'name')) %>% 
+    filter(!is.na(P.Value)) %>% 
+    filter(enriched != "none") %>% 
+    mutate(logFC = ifelse(logFC > 0, 3, -3))
+  gene <- structure(data$logFC, names = data$to)
+  try(pathview(gene.data = gene, pathway.id = path_id, species = "hsa", limit = list(gene = 3),
+               out.suffix = paste0('fmt_1.', suffix), low = "#abd9e9", high = "#fdae61") )
+  } ) 
+
+# fmt-2
+map(terms, \(x) {
+  suffix <- paste0(gsub(" ", "_", x))
+  path_id <- kegg_info$KEGGPATHID2NAME$from[kegg_info$KEGGPATHID2NAME$to == x]
+  data <- kegg_info$KEGGPATHID2EXTID %>% 
+    filter(from == path_id) %>% 
+    left_join(gene_info, by = c('to' = 'ENTREZID')) %>% 
+    left_join(diff, by = c("SYMBOL" = "name")) %>% 
+    filter(!is.na(logFC))
+  gene <- structure(data$logFC, names = data$to)
+  try(pathview(gene.data = gene, pathway.id = path_id, species = "hsa", limit = list(gene = 3),
+               out.suffix = paste0('fmt_2.', suffix), low = "#abd9e9", high = "#fdae61"))
+  } ) 
+
+
+#### 基因表达 SFTS vs. HC ####
+tpm <- read.delim("../data/profile_tpm.txt", row.names = 1)
+group <- read.delim('../data/group.txt')
+
+# 5468 | PPARG | ENSG00000132170
+# 3725 | JUN | ENSG00000177606
+# 2353 | FOS | ENSG00000170345
+map(c('PPARG', 'PPARA', 'PPARD', 'JUN','FOS'), \(x)
+    data.frame(t(tpm[x,])) %>% 
+      dplyr::rename(value = 1) %>% 
+      rownames_to_column("sample") %>% 
+      left_join(group, by = "sample") %>% 
+      ggboxplot("group", "value", fill = "group", legend = "none", 
+                xlab = '', ylab = paste0('TPM of ', x), width = .6) +
+      stat_compare_means(comparisons = list(c('HC', 'SFTS')), label = "p.signif", 
+                         method = "wilcox", step.increase = .06, vjust = .8, 
+                         tip.length = .02) +
+      theme(aspect.ratio = 1)
+    ) %>% cowplot::plot_grid(plotlist = ., nrow = 2, align = 'v')
+ggsave("diff_group.gene.exp.boxplot.pdf", width = 10, height = 6)
+
+#### GSEA 富集分析 severity ####
+library(BiocParallel)
+library(enrichplot)
+register(SerialParam())
+
+diffs <- readRDS('diffs_severity.rds')
+
+gene_info <- AnnotationDbi::select(org.Hs.eg.db, diff[[1]]$name, keytype = 'SYMBOL',
+                                   columns = c('ENTREZID'))
+
+gseKEGGs <- map(diffs, \(x)
+                left_join(x, gene_info, by = c("name" = "SYMBOL")) %>% 
+                  filter(!is.na(ENTREZID)) %>% 
+                  pull(logFC, name = ENTREZID) %>%
+                  sort(decreasing = T) %>% 
+                  gseKEGG(organism = "hsa", pvalueCutoff = 1) %>% 
+                  data.frame())
+openxlsx::write.xlsx(gseKEGGs, 'diffs_severity.gseKEGG.xlsx')
+saveRDS(gseKEGGs, "diffs_severity.gseKEGG.rds")
+
+#### ORA 富集分析 severity ####
+eKEGGs <- map(diffs, \(x)
+              left_join(x, gene_info, by = c('name' = 'SYMBOL')) %>% 
+                filter(enriched != 'none') %>%
+                pull(ENTREZID) %>% 
+                enrichKEGG(organism = 'hsa', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+                data.frame())
+openxlsx::write.xlsx(eKEGGs, 'diffs_severity.eKEGG.xlsx')
+saveRDS(eKEGGs, 'diffs_severity.eKEGG.rds')
+
+#### path展示 severity ####
+library(pathview)
+
+kegg_info <- download_KEGG("hsa")
+terms <- c('MAPK signaling pathway', 'Retinol metabolism', 'NF-kappa B signaling pathway',
+           'Toll-like receptor signaling pathway','B cell receptor signaling pathway',
+           'JAK-STAT signaling pathway','T cell receptor signaling pathway', 'PPAR signaling pathway',
+           'NOD-like receptor signaling pathway','RIG-I-like receptor signaling pathway')
+
+# fmt-1
+map(terms, \(x)
+    map(names(diff), \(y)
+        {
+          suffix <- paste0(gsub(" ", "_", x), ".", y)
+          path_id <- kegg_info$KEGGPATHID2NAME$from[kegg_info$KEGGPATHID2NAME$to == x]
+          data <- kegg_info$KEGGPATHID2EXTID %>% 
+            filter(from == path_id) %>% 
+            left_join(gene_info, by = c('to' = 'ENTREZID')) %>% 
+            left_join(diff[[y]], by = c("SYMBOL" = "name")) %>% 
+            filter(!is.na(P.Value)) %>% 
+            filter(enriched != "none") %>% 
+            mutate(logFC = ifelse(logFC > 0, 1, -1))
+          gene <- structure(data$logFC, names = data$to)
+          try(pathview(gene.data = gene, pathway.id = path_id, species = "hsa", 
+                       out.suffix = paste0('fmt_1.', suffix), low = "#abd9e9", high = "#fdae61"))
+    } ) )
+
+# fmt-2
+map(terms, \(x)
+    map(names(diff), \(y)
+        {
+          suffix <- paste0(gsub(" ", "_", x), ".", y)
+          path_id <- kegg_info$KEGGPATHID2NAME$from[kegg_info$KEGGPATHID2NAME$to == x]
+          data <- kegg_info$KEGGPATHID2EXTID %>% 
+            filter(from == path_id) %>% 
+            left_join(gene_info, by = c('to' = 'ENTREZID')) %>% 
+            left_join(diff[[y]], by = c("SYMBOL" = "name")) %>% 
+            filter(!is.na(logFC))
+          gene <- structure(data$logFC, names = data$to)
+          try(pathview(gene.data = gene, pathway.id = path_id, species = "hsa", 
+                       out.suffix = paste0('fmt_2.', suffix), low = "#abd9e9", high = "#fdae61"))
+    } ) )
+
+
+#### 基因表达 severity ####
+tpm <- read.delim("../data/profile_tpm.txt", row.names = 1)
+group <- read.delim('../data/group.txt')
+
+# 5468 | PPARG | ENSG00000132170
+# 3725 | JUN | ENSG00000177606
+# 2353 | FOS | ENSG00000170345
+map(c('PPARG', 'PPARA', 'PPARD','JUN','FOS'), \(x)
+    data.frame(t(tpm[x,])) %>% 
+      dplyr::rename(value = 1) %>% 
+      rownames_to_column("sample") %>% 
+      left_join(group, by = "sample") %>% 
+      ggboxplot("severity", "value", fill = "severity", legend = "none", 
+                xlab = '', ylab = paste0('TPM of ', x), width = .6) +
+      stat_compare_means(comparisons = combn(c('HC', 'moderate', 'severe', 'fatal'), 2) %>% 
+                           data.frame() %>% as.list(), 
+                         label = "p.signif", method = "wilcox", 
+                         step.increase = .06, vjust = .8, tip.length = .02) +
+      theme(aspect.ratio = 1)
+) %>% cowplot::plot_grid(plotlist = ., nrow = 2, align = 'v')
+ggsave("diffs_severity.gene.exp.boxplot.pdf", width = 10, height = 6)
+```

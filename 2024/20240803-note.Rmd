@@ -1,0 +1,118 @@
+---
+title: "BC abundance comparison in Homo IBD shotgun metagenomic public dataset"
+author: "Jinxin Meng"
+date: "2024-08-03"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## SchirmerM_2018.PRJNA389280 mapping-method
+
+```{R}
+group <- read.delim('data/group/SchirmerM_2018.PRJNA389280.sample_group.tsv') %>% 
+  select(sample = run, group = group2)
+
+data <- read.delim('data/map/SchirmerM_2018.PRJNA389280.profile') %>% 
+  mutate(rela_ab = rc / libs * 100) %>% 
+  left_join(group, by = 'sample') %>% 
+  mutate(group = factor(group, c('CT', 'CD', 'UC')))
+
+calcu_diff(data, rela_ab ~ group)
+
+ggviolin(data, 'group', 'rela_ab', color = 'group', legend = 'none', xlab = '', size = 1, width = .5,
+         ylab = 'Relative abundance(%)',  palette = c('#69a7bc','#E69F00','#f08178'),
+         outlier.shape = NA, title = 'SchirmerM_2018') +
+  geom_boxplot(aes(color = group), width = .2, size = 1, outlier.shape = NA) + 
+  geom_jitter(aes(color = group), width = .2) +
+  coord_cartesian(ylim = c(NA, .85)) +
+  stat_compare_means(comparisons = list(c('CD','CT'), c('UC','CT'), c('CD','UC')), 
+                     label = 'p.label', label.y = .75, tip.length = .02, 
+                     step.increase = .06, vjust = .2, size = 2) +
+  theme(plot.title = element_text(face = 'bold', hjust = .5),
+        axis.ticks.length = unit(2, 'mm'))
+ggsave('SchirmerM_2018.pdf', width = 3.5, height = 4)
+```
+
+## WengY_2019.PRJNA429990 mapping-method
+
+```{R}
+group <- read.delim('data/group/WengY_2019.PRJNA429990.sample_group.tsv')
+
+data <- read.delim('data/map/WengY_2019.PRJNA429990.profile') %>% 
+  mutate(rela_ab = rc / libs * 100) %>% 
+  left_join(group, by = 'sample') %>% 
+  mutate(group = factor(group, c('Control', 'UC', 'CD')))
+
+calcu_diff(data, rela_ab ~ group)
+
+ggviolin(data, 'group', 'rela_ab', color = 'group', legend = 'none', xlab = '', size = 1, width = .5,
+         ylab = 'Relative abundance(%)', palette = c('#69a7bc','#E69F00','#f08178'),
+         outlier.shape = NA, title = 'WengY_2019') +
+  geom_boxplot(aes(color = group), width = .2, size = 1, outlier.shape = NA) + 
+  geom_jitter(aes(color = group), width = .2) +
+  lims(y = c(NA, .7)) +
+  stat_compare_means(comparisons = list(c('Control','UC'), c('Control','CD'), c('UC','CD')), 
+                     label = 'p.label', label.y = .54, tip.length = .01, 
+                     step.increase = .02, vjust = .2, size = 2) +
+  theme(plot.title = element_text(face = 'bold', hjust = .5),
+        axis.ticks.length = unit(2, 'mm'))
+ggsave('WengY_2019.pdf', width = 3.5, height = 4)
+```
+
+## HeQ_2017.PRJEB15371 mapping-method
+
+```{R}
+group <- read.delim('data/group/HeQ_2017.PRJEB15371.sample_group.tsv')
+
+data <- read.delim('data/map/HeQ_2017.PRJEB15371.profile') %>% 
+  mutate(rela_ab = rc / libs * 100) %>% 
+  left_join(group, by = 'sample') %>% 
+  mutate(group = factor(group, c('Control', 'CD')))
+
+calcu_diff(data, rela_ab ~ group)
+
+ggviolin(data, 'group', 'rela_ab', color = 'group', legend = 'none', xlab = '', size = 1, width = .5,
+         ylab = 'Relative abundance(%)',  palette = c('#69a7bc','#E69F00','#f08178'),
+          outlier.shape = NA, title = 'HeQ_2017') +
+  geom_boxplot(aes(color = group), width = .2, size = 1, outlier.shape = NA) + 
+  geom_jitter(aes(color = group), width = .2) +
+  lims(y = c(NA, .8)) +
+  stat_compare_means(comparisons = list(c('Control', 'CD')), label = 'p.label', label.y = .65,
+                     tip.length = .004, step.increase = .042, vjust = .2, size = 2) +
+  theme(plot.title = element_text(face = 'bold', hjust = .5),
+        axis.ticks.length = unit(2, 'mm'))
+ggsave('HeQ_2017.pdf', width = 2.5, height = 4)
+```
+
+## YanQ_2023c.PRJEB67456 mapping-method
+
+```{R}
+group <- read.delim('data/group/YanQ_2023c.PRJEB67456.sample_group.tsv') %>% 
+  select(sample = run, group)
+
+data <- read.delim('data/map/YanQ_2023c.PRJEB67456.profile') %>% 
+  mutate(rela_ab = rc / libs * 100) %>% 
+  left_join(group, by = 'sample') %>% 
+  mutate(group = factor(group, c('healthy','CD','UC')))
+
+calcu_diff(data, rela_ab ~ group)
+
+ggviolin(data, 'group', 'rela_ab', color = 'group', legend = 'none', xlab = '', size = 1, width = .5,
+         ylab = 'Relative abundance(%)',  palette = c('#69a7bc','#E69F00','#f08178'),
+         outlier.shape = NA, title = 'YanQ_2023') +
+  geom_boxplot(aes(color = group), width = .2, size = 1, outlier.shape = NA) + 
+  geom_jitter(aes(color = group), width = .2) +
+  lims(y = c(NA, 1.5)) +
+  stat_compare_means(comparisons = list(c('healthy', 'UC'), c('healthy', 'CD')), label.y = 1.3,
+                     tip.length = .01, step.increase = .042, vjust = .2, size = 2) +
+  theme(aspect.ratio = 1, 
+        plot.title = element_text(face = 'bold', hjust = .5),
+        axis.ticks.length = unit(2, 'mm'))
+ggsave('YanQ_2023c.pdf', width = 3.5, height = 4)
+```

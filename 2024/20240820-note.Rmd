@@ -1,0 +1,354 @@
+---
+title: "BC Treat Mus Colon RNASeq"
+author: "Jinxin Meng"
+date: "2024-08-20"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## pipeline
+
+```{bash}
+cat raw_fq.filelist | parallel --colsep="\t" -j 6 run_fastp.sh {2} clean_fq/{1}
+cat clean_fq.filelist | parallel -j 6 --colsep="\t" run_hisat2.sh {2} /data/database/hisat2/grcm39_tran-r110/grcm39 hisat2/{1}
+featureCounts -p -g gene_id -t exon -f -T 56 -a /data/database/hisat2/grcm39_tran-r110/Mus_musculus.GRCm39.110.gtf -o featureCounts/featureCount.out hisat2/*sort.bam
+sed 1d profile.rc | csvtk cut -t -f -2--6
+profile_summary_by_group.py profile.rc profile.rc.sum
+cat sample_name | parallel -j 5 stringtie -p 24 -o stringtie/{}.gtf -B -e -A stringtie/{}.tsv -G /data/database/hisat2/grcm39_tran-r110/Mus_musculus.GRCm39.110.gtf hisat2/{}.sort.bam
+prepDE.py3 -i stringtie.filelist -g stringtie.g_rc.tsv -t stringtie.t_rc.tsv
+getFPKM.py3 -i stringtie.filelist -g stringtie.g_fpkm.csv -t stringtie.t_fpkm.csv
+getTPM.py3 -i stringtie.filelist -g stringtie.g_tpm.csv -t stringtie.t_tpm.csv
+```
+
+## D7 markers abundance
+
+```{R}
+fpkm <- read.delim('../data/fpkm.tsv', row.names = 1, check.names = F) %>% 
+  dplyr::select(contains('7d'))
+
+group <- read.delim('../data/group.tsv') %>% 
+  filter(sample %in% colnames(fpkm))
+group_level <- c('Pbs.7d', 'BC.7d')
+
+markers <- list(
+  aISC = c('Lgr5','Sox9','Ascl2'),
+  rISC = c('Hopx','Clu','Bmi1'),
+  PC = c('Ang4','Lyz1'),
+  GC = c('Muc2','Ccl9'),
+  TC = c('Dclk1','Cd24a','Trpm5'),
+  EEC = c('Chga', 'Neurog3')
+)
+
+marker_level <- c('aISC', 'rISC', 'PC', 'GC', 'TC', 'EEC')
+
+fpkm <- filter(fpkm, rownames(fpkm) %in% unlist(markers, use.names = F)) 
+
+row_data <- map2_dfr(markers, names(markers), ~ data.frame(name = .x, class = .y)) %>% 
+  mutate(name = factor(name, rownames(fpkm))) %>% 
+  arrange(name) %>% 
+  column_to_rownames('name') %>% 
+  mutate(class = factor(class, marker_level))
+
+col_data <- dplyr::select(group, sample, group) %>% 
+  mutate(sample = factor(sample, colnames(fpkm))) %>% 
+  arrange(sample) %>% 
+  column_to_rownames('sample') %>% 
+  mutate(group = factor(group, group_level))
+
+row_split <- row_data$class
+col_split <- col_data$group
+
+pdf('D7.marker.heatmap.all.pdf', width = 4, height = 4)
+pheatmap(fpkm, scale = 'row',
+         color = colorRampPalette(c('#4196aa', 'white', '#d18b0f'))(100),
+         split = row_split, column_split = col_split,
+         cluster_row_slices = F, cluster_column_slices = F, 
+         row_title_rot = 0,
+         row_title_gp = gpar(fontsize = 8), column_title_gp = gpar(fontsize = 8),
+         row_gap = unit(1, 'mm'), column_gap = unit(1, 'mm'),
+         treeheight_col = 15, treeheight_row = 15,
+         cellheight = 12, cellwidth = 12,
+         border_color = 'white',
+         border_gp = gpar(col = 'black'),
+         heatmap_legend_param = list(title = 'Scale FPKM'))
+dev.off()
+```
+
+## D7 difference analysis
+
+```{R}
+library(org.Mm.eg.db)
+
+fpkm <- read.delim('../data/fpkm.tsv', row.names = 1)
+
+gene_info <- AnnotationDbi::select(org.Mm.eg.db, rownames(fpkm), keytype = 'SYMBOL',
+                                   columns = c('GENETYPE', 'ENTREZID')) %>% 
+  filter(GENETYPE == 'protein-coding')
+
+fpkm <- filter(fpkm, rownames(fpkm) %in% gene_info$SYMBOL) %>% 
+  dplyr::select(all_of(samples))
+fpkm <- log2(fpkm[rowSums(fpkm > 0) == ncol(fpkm), ])
+
+group <- read.delim('../data/group.tsv') %>% 
+  filter(sample %in% samples) %>% 
+  mutate(group = factor(group, c('Pbs.7d', 'BC.7d')))
+
+group_level <- group$group
+design <- model.matrix(~ group_level)
+colnames(design) <- gsub('group_level', '', colnames(design))
+
+fit <- lmFit(fpkm, design)
+fit <- eBayes(fit)
+
+diff <- topTable(fit, coef = 'BC.7d', number = Inf, adjust.method = 'BH') %>% 
+  rownames_to_column('name') %>% 
+  mutate(enriched = ifelse(logFC > 1 & P.Value < 0.05, 'BC.7d', 
+                           ifelse(logFC < -1 & P.Value < 0.05, 'Pbs.7d', 'none')))
+write.xlsx(diff, 'D7.diff.xlsx')
+```
+
+## D7 enrichment analysis
+```{R}
+eKEGG <- filter(diff, enriched == 'BC.7d') %>% 
+  mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>% 
+  pull(ENTREZID) %>% 
+  enrichKEGG(organism = 'mmu', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+  data.frame(row.names = NULL) %>% 
+  mutate(geneName = map_vec(strsplit(geneID, '/'), ~ 
+                              paste(gene_info$SYMBOL[match(.x, gene_info$ENTREZID)], 
+                                    collapse = '/')), .after = geneID)
+write.xlsx(eKEGG, 'D7.eKEGG.up_gene.xlsx')
+
+eGO <- filter(diff, enriched == 'BC.7d') %>% 
+  pull(name) %>% 
+  enrichGO(org.Mm.eg.db, keyType = 'SYMBOL', pvalueCutoff = 1, qvalueCutoff = 1, ont = 'ALL') %>% 
+  data.frame(row.names = NULL)
+write.xlsx(eGO, 'D7.eGO.up_gene.xlsx')
+
+plot_data <- read.xlsx('D7.enrichment.xlsx') %>% 
+  dplyr::select(name = Description, FoldEnrichment, qvalue) %>% 
+  arrange(desc(FoldEnrichment)) %>% 
+  mutate(name = factor(name, .$name))
+
+ggscatter(plot_data, 'FoldEnrichment', 'name', fill = 'qvalue', size = 'FoldEnrichment',
+          shape = 21, legend = 'right', ylab = '') +
+  scale_size_continuous(range = c(3, 5)) +
+  scale_fill_viridis_c(direction = 1, begin = .5) +
+  theme(axis.ticks.length = unit(2, 'mm'),
+        panel.grid.major = element_line(linewidth = .4, color = 'grey90'))
+ggsave('D7.enrichment.pdf', width = 8, height = 4)
+```
+
+## D0 markers abundance
+
+```{R}
+fpkm <- read.delim('../data/fpkm.tsv', row.names = 1, check.names = F) %>% 
+  dplyr::select(contains('0d'))
+
+group <- read.delim('../data/group.tsv') %>% 
+  filter(sample %in% colnames(fpkm))
+group_level <- c('Pbs.0d','BC.0d')
+
+markers <- list(
+  aISC = c('Lgr5','Sox9','Ascl2'),
+  rISC = c('Hopx','Bmi1','Clu'),
+  PC = c('Ang4','Lyz1'),
+  GC = c('Muc2','Ccl9'),
+  TC = c('Dclk1','Cd24a','Trpm5'),
+  EEC = c('Chga', 'Neurog3')
+)
+
+marker_level <- c('aISC', 'rISC', 'PC', 'GC', 'TC', 'EEC')
+
+fpkm <- filter(fpkm, rownames(fpkm) %in% unlist(markers, use.names = F)) 
+
+row_data <- map2_dfr(markers, names(markers), ~ data.frame(name = .x, class = .y)) %>% 
+  mutate(name = factor(name, rownames(fpkm))) %>% 
+  arrange(name) %>% 
+  column_to_rownames('name') %>% 
+  mutate(class = factor(class, marker_level))
+
+col_data <- dplyr::select(group, sample, group) %>% 
+  mutate(sample = factor(sample, colnames(fpkm))) %>% 
+  arrange(sample) %>% 
+  column_to_rownames('sample') %>% 
+  mutate(group = factor(group, group_level))
+
+row_split <- row_data$class
+col_split <- col_data$group
+
+pdf('D0.marker.heatmap.all.pdf', width = 4.5, height = 4)
+pheatmap(fpkm, scale = 'row',
+         color = colorRampPalette(c('#4196aa', 'white', '#d18b0f'))(100),
+         split = row_split, column_split = col_split,
+         cluster_row_slices = F, cluster_column_slices = F, 
+         row_title_rot = 0,
+         row_title_gp = gpar(fontsize = 8), column_title_gp = gpar(fontsize = 8),
+         row_gap = unit(1, 'mm'), column_gap = unit(1, 'mm'),
+         treeheight_col = 15, treeheight_row = 15,
+         cellheight = 12, cellwidth = 12,
+         border_color = 'white',
+         border_gp = gpar(col = 'black'),
+         heatmap_legend_param = list(title = 'Scale FPKM'))
+dev.off()
+```
+
+## D0 difference analysis
+
+```{R}
+gene_info <- AnnotationDbi::select(org.Mm.eg.db, rownames(fpkm), keytype = 'SYMBOL',
+                                   columns = c('GENETYPE', 'ENTREZID')) %>% 
+  filter(GENETYPE == 'protein-coding')
+
+fpkm <- filter(fpkm, rownames(fpkm) %in% gene_info$SYMBOL) %>% 
+  dplyr::select(all_of(samples))
+fpkm <- log2(fpkm[rowSums(fpkm > 0) == ncol(fpkm), ])
+
+group <- read.delim('../data/group.tsv') %>% 
+  filter(sample %in% samples) %>% 
+  mutate(group = factor(group, c('Pbs.0d', 'BC.0d')))
+
+group_level <- group$group
+design <- model.matrix(~ group_level)
+colnames(design) <- gsub('group_level', '', colnames(design))
+
+fit <- lmFit(fpkm, design)
+fit <- eBayes(fit)
+
+diff <- topTable(fit, coef = 'BC.0d', number = Inf, adjust.method = 'BH') %>% 
+  rownames_to_column('name') %>% 
+  mutate(enriched = ifelse(logFC > 1 & P.Value < 0.05, 'BC.0d', 
+                           ifelse(logFC < -1 & P.Value < 0.05, 'Pbs.0d', 'none')))
+write.xlsx(diff, 'D0.diff.xlsx')
+```
+
+## D0 enrichment analysis
+```{R}
+eKEGG <- filter(diff, enriched == 'BC.0d') %>% 
+  mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>% 
+  pull(ENTREZID) %>% 
+  enrichKEGG(organism = 'mmu', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+  data.frame(row.names = NULL) %>% 
+  mutate(geneName = map_vec(strsplit(geneID, '/'), ~ 
+                              paste(gene_info$SYMBOL[match(.x, gene_info$ENTREZID)], 
+                                    collapse = '/')), .after = geneID)
+write.xlsx(eKEGG, 'D0.eKEGG.up_gene.xlsx')
+
+eGO <- filter(diff, enriched == 'BC.0d') %>% 
+  pull(name) %>% 
+  enrichGO(org.Mm.eg.db, keyType = 'SYMBOL', pvalueCutoff = 1, qvalueCutoff = 1, ont = 'ALL') %>% 
+  data.frame(row.names = NULL)
+write.xlsx(eGO, 'D0.eGO.up_gene.xlsx')
+```
+
+
+## D1 markers abundance
+
+```{R}
+fpkm <- read.delim('../data/fpkm.tsv', row.names = 1, check.names = F) %>% 
+  dplyr::select(contains('1d'))
+
+group <- read.delim('../data/group.tsv') %>% 
+  filter(sample %in% colnames(fpkm))
+group_level <- c('Pbs.1d', 'BC.1d')
+
+markers <- list(
+  aISC = c('Lgr5','Sox9','Ascl2'),
+  rISC = c('Hopx','Clu','Bmi1'),
+  PC = c('Ang4','Lyz1'),
+  GC = c('Muc2','Ccl9'),
+  TC = c('Dclk1','Cd24a','Trpm5'),
+  EEC = c('Chga', 'Neurog3')
+)
+
+marker_level <- c('aISC', 'rISC', 'PC', 'GC', 'TC', 'EEC')
+
+fpkm <- filter(fpkm, rownames(fpkm) %in% unlist(markers, use.names = F)) 
+
+row_data <- map2_dfr(markers, names(markers), ~ data.frame(name = .x, class = .y)) %>% 
+  mutate(name = factor(name, rownames(fpkm))) %>% 
+  arrange(name) %>% 
+  column_to_rownames('name') %>% 
+  mutate(class = factor(class, marker_level))
+
+col_data <- dplyr::select(group, sample, group) %>% 
+  mutate(sample = factor(sample, colnames(fpkm))) %>% 
+  arrange(sample) %>% 
+  column_to_rownames('sample') %>% 
+  mutate(group = factor(group, group_level))
+
+row_split <- row_data$class
+col_split <- col_data$group
+
+pdf('D1.marker.heatmap.all.pdf', width = 5, height = 4)
+pheatmap(fpkm, scale = 'row',
+         color = colorRampPalette(c('#4196aa', 'white', '#d18b0f'))(100),
+         split = row_split, column_split = col_split,
+         cluster_row_slices = F, cluster_column_slices = F, 
+         row_title_rot = 0,
+         row_title_gp = gpar(fontsize = 8), column_title_gp = gpar(fontsize = 8),
+         row_gap = unit(1, 'mm'), column_gap = unit(1, 'mm'),
+         treeheight_col = 15, treeheight_row = 15,
+         cellheight = 12, cellwidth = 12,
+         border_color = 'white',
+         border_gp = gpar(col = 'black'),
+         heatmap_legend_param = list(title = 'Scale FPKM'))
+dev.off()
+```
+
+## D1 difference analysis
+
+```{R}
+fpkm <- read.delim('../data/fpkm.tsv', row.names = 1)
+
+gene_info <- AnnotationDbi::select(org.Mm.eg.db, rownames(fpkm), keytype = 'SYMBOL',
+                                   columns = c('GENETYPE', 'ENTREZID')) %>% 
+  filter(GENETYPE == 'protein-coding')
+
+fpkm <- filter(fpkm, rownames(fpkm) %in% gene_info$SYMBOL) %>% 
+  dplyr::select(all_of(samples))
+fpkm <- log2(fpkm[rowSums(fpkm > 0) == ncol(fpkm), ])
+
+group <- read.delim('../data/group.tsv') %>% 
+  filter(sample %in% samples) %>% 
+  mutate(group = factor(group, c('Pbs.1d', 'BC.1d')))
+
+group_level <- group$group
+design <- model.matrix(~ group_level)
+colnames(design) <- gsub('group_level', '', colnames(design))
+
+fit <- lmFit(fpkm, design)
+fit <- eBayes(fit)
+
+diff <- topTable(fit, coef = 'BC.1d', number = Inf, adjust.method = 'BH') %>% 
+  rownames_to_column('name') %>% 
+  mutate(enriched = ifelse(logFC > 1 & P.Value < 0.05, 'BC.1d', 
+                           ifelse(logFC < -1 & P.Value < 0.05, 'Pbs.1d', 'none')))
+write.xlsx(diff, 'D1.diff.xlsx')
+```
+
+## D1 enrichment analysis
+```{R}
+eKEGG <- filter(diff, enriched == 'BC.1d') %>% 
+  mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$SYMBOL)]) %>% 
+  pull(ENTREZID) %>% 
+  enrichKEGG(organism = 'mmu', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+  data.frame(row.names = NULL) %>% 
+  mutate(geneName = map_vec(strsplit(geneID, '/'), ~ 
+                              paste(gene_info$SYMBOL[match(.x, gene_info$ENTREZID)], 
+                                    collapse = '/')), .after = geneID)
+write.xlsx(eKEGG, 'D1.eKEGG.up_gene.xlsx')
+
+eGO <- filter(diff, enriched == 'BC.1d') %>% 
+  pull(name) %>% 
+  enrichGO(org.Mm.eg.db, keyType = 'SYMBOL', pvalueCutoff = 1, qvalueCutoff = 1, ont = 'ALL') %>% 
+  data.frame(row.names = NULL)
+write.xlsx(eGO, 'D1.eGO.up_gene.xlsx')
+```
+

@@ -1,0 +1,815 @@
+---
+title: "MGX 16S Sus diarrhea in public datasets, focus on PEDV, PDCoV, PWD"
+author: "Jinxin Meng"
+date: "2025-04-03"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## pipeline
+
+#### BeaumontM_2023.PWD
+
+```{bash}
+cat raw_fq.pair-end.filelist | parallel -j 10 --colsep="\t" fastp -l 200 -i {2} -I {3} -o fastp/{1}.clean_1.fq.gz -O fastp/{1}.clean_2.fq.gz -j /dev/null -h /dev/null 2\> fastp/{1}.log
+cat fastp.filelist | parallel --colsep="\t" -j 8 flash2 -m 10 -M 200 --max-mismatch-density 0.25 -t 2 --compress -q {2} {3} -o {1} -d flash2
+
+le fastp.filelist | cut -f1 | parallel -j 10 ln -s /data/mengjx/project/20250223_Sus_diarrhea/MGX_16S_Sus_diarrhea_pubs/BeaumontM_2023.PWD/flash2/{}.extendedFrags.fastq.gz combine_fq/{}.fastq.gz
+ls /data/mengjx/project/20250223_Sus_diarrhea/MGX_16S_Sus_diarrhea_pubs/BeaumontM_2023.PWD/combine_fq/*gz | filelist -2 | csvtk add-header -t -n "sample-id,absolute-filepath" > sample_list
+
+qiime tools import --type 'SampleData[SequencesWithQuality]' --input-format SingleEndFastqManifestPhred33V2 --input-path sample_list --output-path seqs/seqs.qza
+qiime demux summarize --i-data seqs/seqs.qza --o-visualization seqs/seqs.qzv
+
+qiime dada2 denoise-single --i-demultiplexed-seqs seqs/seqs.qza --p-trunc-len 0 --p-trim-left 0 --o-representative-sequences dada2/rep_seqs.qza --o-table dada2/table.qza --o-denoising-stats dada2/stats.qza --p-n-threads 0
+qiime feature-table summarize --i-table dada2/table.qza --o-visualization dada2/table.qzv --m-sample-metadata-file sample_group
+qiime tools export --input-path dada2/table.qza --output-path dada2 && biom convert -i dada2/feature-table.biom -o dada2/table.tsv --to-tsv
+qiime tools export --input-path dada2/rep_seqs.qza --output-path dada2/
+
+qiime phylogeny align-to-tree-mafft-fasttree --i-sequences dada2/rep_seqs.qza --o-alignment tree/aligned.qza --o-masked-alignment tree/masked-aligned.qza --o-tree tree/unrooted-tree.qza --o-rooted-tree tree/rooted-tree.qza --p-n-threads 100
+
+qiime diversity core-metrics --i-table dada2/table.qza --p-sampling-depth 9302 --m-metadata-file sample_group --p-n-jobs 56 --o-rarefied-table div/table_rarefied.qza --output-dir div/core
+qiime tools export --input-path div/table_rarefied.qza --output-path div/ && biom convert -i div/feature-table.biom -o div/table_rarefied.tsv --to-tsv
+
+qiime feature-classifier classify-sklearn --p-n-jobs 20 --i-classifier /data/database/silva/338F_806R/q2-138-99-338F-806R-classifier.qza --i-reads dada2/rep_seqs.qza --o-classification taxa/taxa.qza
+qiime taxa barplot --i-table div/table_rarefied.qza --i-taxonomy taxa/taxa.qza --m-metadata-file sample_group --o-visualization taxa/barplot.qza
+
+picrust2_pipeline_oldIMG.py -s dada2/dna-sequences.fasta -i div/feature-table.biom -o picrust2/ -p 50
+```
+
+#### LiH_2020.PDCoV/SuY_2021.PWD/YangQ_2017.PWD/YangS_2020.PEDV/HuangM_2018.PEDV
+
+```{bash}
+realpath raw_fq/*gz | paste - - | filelist -2 | csvtk add-header -t -n "sample-id,forward-absolute-filepath,reverse-absolute-filepath" | sed 's/_2//' > sample_list
+
+qiime tools import --type 'SampleData[PairedEndSequencesWithQuality]' --input-format PairedEndFastqManifestPhred33V2 --input-path sample_list --output-path seqs/seqs.qza
+qiime demux summarize --i-data seqs/seqs.qza --o-visualization seqs/seqs.qzv
+
+qiime dada2 denoise-paired --i-demultiplexed-seqs seqs/seqs.qza --p-trim-left-f 26 --p-trim-left-r 26 --p-trunc-len-f 296 --p-trunc-len-r 256 --o-representative-sequences dada2/rep_seqs.qza --o-table dada2/table.qza --o-denoising-stats dada2/stats.qza --p-n-threads 100
+qiime feature-table summarize --i-table dada2/table.qza --o-visualization dada2/table.qzv --m-sample-metadata-file sample_group
+qiime tools export --input-path dada2/table.qza --output-path dada2 && biom convert -i dada2/feature-table.biom -o dada2/table.tsv --to-tsv
+qiime tools export --input-path dada2/rep_seqs.qza --output-path dada2/
+
+qiime phylogeny align-to-tree-mafft-fasttree --i-sequences dada2/rep_seqs.qza --o-alignment tree/aligned.qza --o-masked-alignment tree/masked-aligned.qza --o-tree tree/unrooted-tree.qza --o-rooted-tree tree/rooted-tree.qza --p-n-threads 56
+
+qiime diversity core-metrics --i-table dada2/table.qza --p-sampling-depth 10000 --m-metadata-file sample_group --p-n-jobs 56 --o-rarefied-table div/table_rarefied.qza --output-dir div/core
+qiime tools export --input-path div/table_rarefied.qza --output-path div/ && biom convert -i div/feature-table.biom -o div/table_rarefied.tsv --to-tsv
+
+qiime feature-classifier classify-sklearn --p-n-jobs 56 --i-classifier /data/database/silva/338F_806R/silva-138-99-338F_806R_classifier.qza --i-reads dada2/rep_seqs.qza --o-classification taxa/taxa.qza
+qiime taxa barplot --i-table div/table_rarefied.qza --i-taxonomy taxa/taxa.qza --m-metadata-file sample_group --o-visualization taxa/barplot.qza
+
+picrust2_pipeline_oldIMG.py -s dada2/dna-sequences.fasta -i div/feature-table.biom -o picrust2/ -p 50```
+```
+
+## 16S downstream analysis
+
+#### BeaumontM_2023.PWD
+
+```{R}
+#### info ####
+colors <- c("#66c2a5","#fc8d62","#8da0cb","#e78ac3","#a6d854","#ffd92f",
+            "#8dd3c7","#fdb462","#80b1d3","#fccde5","#d9ef8b","#fee391")
+
+group <- read.delim("../data/group.tsv")
+
+profile <- read.delim("../data/table_taxa.tsv", row.names = 1, check.names = F) %>% 
+  profile_filter(by_group = F, min_n = 2) %>% 
+  profile_transRA()
+
+taxa <- read.delim("../data/taxonomy.tsv") %>% 
+  filter(name %in% rownames(profile))
+
+tr <- treeio::read.tree('../data/tree.nwk')
+
+comparison <- c('PWD', 'HC')
+
+#### alpha div ####
+map(c('pd', 'shannon', 'richness', 'ace'), ~
+  calcu_alpha(profile, method = .x, tree = tr) %>% 
+    left_join(group, by = 'sample') %>% 
+    mutate(group = factor(group, comparison)) %>% 
+    ggboxplot('group', 'value', fill = 'group', palette = colors, 
+            legend = 'none', outlier.size = 1, xlab = "",  
+            ylab = paste0(.x, ' index')) +
+    stat_compare_means(comparisons = list(comparison), label = "p.signif", 
+                       step.increase = .06, vjust = .7, tip.length = .02) +
+    theme(aspect.ratio = 2) ) %>% 
+  cowplot::plot_grid(plotlist = ., nrow = 1, align = 'v')
+ggsave("taxa.div.alpha.pdf", width = 8, height = 3)
+
+#### beta div ####
+plot_PCoA(profile, group, group_order = comparison, group_color = colors, 
+          lab_size = 3, ellipse_level = .9, show_legend = T, show_grid = F, 
+          show_line = F, display_type = 'dot')
+ggsave("taxa.div.beta.pdf", width = 5, height = 4)
+
+#### diff ####
+map(c('phylum', 'family', 'genus', 'species'), ~
+      taxa_trans(profile, taxa, group, to = .x, out_all = T, transRA = T) %>% 
+      difference_analysis(group, comparison = comparison, method = 'wilcox', 
+                          add_enriched = T, log2fc = 0, pvalue = 0.05) ) %>% 
+  set_names(c('phylum', 'family', 'genus', 'species')) %>% 
+  write.xlsx('taxa.diffs.xlsx')
+
+#### MaAsLin2 ####
+library(Maaslin2)
+
+# family
+data <- taxa_trans(profile, taxa, to = 'family', out_all = T, transRA = T)
+group_x <- read.delim('../data/group.tsv') %>% 
+  column_to_rownames('sample')
+Maaslin2(data, group_x, output = 'masslin2.taxa_family.out', analysis_method = "LM",
+         normalization = 'NONE', transform = 'LOG', correction = 'bonferroni', 
+         fixed_effects = c('group'), random_effects = c('sow', 'sex', 'farm'), 
+         save_models = T, save_scatter = T)
+
+# genus
+data <- taxa_trans(profile, taxa, to = 'genus', out_all = T, transRA = T)
+group_x <- read.delim('../data/group.tsv') %>% 
+  column_to_rownames('sample')
+Maaslin2(data, group_x, output = 'masslin2.taxa_genus.out', analysis_method = "LM",
+         normalization = 'NONE', transform = 'LOG', correction = 'bonferroni', 
+         fixed_effects = c('group'), random_effects = c('sow', 'sex', 'farm'), 
+         save_models = T, save_scatter = T)
+
+#### path ####
+group <- read.delim("../data/group.tsv")
+profile <- read.delim("../data/table_path.tsv", row.names = 1)
+
+data <- difference_analysis(profile, group, comparison = comparison, method = 'wilcox', 
+                            add_enriched = T, log2fc = 0, pvalue = 0.05)
+  
+write.xlsx(data, 'path.diffs.xlsx')
+
+#### KO/lvA/lvB/lvC ####
+KO_info <- read.delim('/database/KEGG/v20230401/KO_level_A_B_C_D_Description')
+
+group <- read.delim("../data/group.tsv")
+profile <- read.delim("../data/table_KO.tsv", row.names = 1)
+
+data <- difference_analysis(profile, group, comparison = comparison, method = 'wilcox', 
+                            add_enriched = T, log2fc = 0, pvalue = 0.05) %>% 
+  mutate(KO_info = KO_info$lvDdes[match(name, KO_info$lvD)])
+write.xlsx(data, 'KO.diffs.xlsx')
+
+data <- map(c('A', 'B', 'C'), ~
+              profile_KEGG_convert(profile, to = .x) %>% 
+              difference_analysis(group, comparison = comparison, method = 'wilcox', 
+                                  add_enriched = T, log2fc = 0, pvalue = 0.05) %>% 
+              left_join(KO_info %>% 
+                          select(all_of(paste0('lv', .x, c('', 'des')))) %>% 
+                          distinct(), 
+                        by = c('name' = paste0('lv', .x))) ) %>% 
+  set_names(paste0('lv', c('A', 'B', 'C')))
+write.xlsx(data, 'KO_lvABC.diffs.xlsx')
+```
+
+#### HuangM_2018.PEDV
+
+```{R}
+#### info ####
+colors <- c("#66c2a5","#fc8d62","#8da0cb","#e78ac3","#a6d854","#ffd92f",
+            "#8dd3c7","#fdb462","#80b1d3","#fccde5","#d9ef8b","#fee391")
+
+group <- read.delim("../data/group.tsv")
+
+profile <- read.delim("../data/table_taxa.tsv", row.names = 1, check.names = F) %>% 
+  profile_filter(by_group = F, min_n = 2) %>% 
+  profile_transRA()
+
+taxa <- read.delim("../data/taxonomy.tsv") %>% 
+  filter(name %in% rownames(profile))
+
+tr <- treeio::read.tree('../data/tree.nwk')
+
+comparison <- c('PEDV', 'HC')
+
+#### alpha div ####
+map(c('pd', 'shannon', 'richness', 'ace'), ~
+  calcu_alpha(profile, method = .x, tree = tr) %>% 
+    left_join(group, by = 'sample') %>% 
+    mutate(group = factor(group, comparison)) %>% 
+    ggboxplot('group', 'value', fill = 'group', palette = colors, 
+            legend = 'none', outlier.size = 1, xlab = "",  
+            ylab = paste0(.x, ' index')) +
+    stat_compare_means(comparisons = list(comparison), label = "p.signif", 
+                       step.increase = .06, vjust = .7, tip.length = .02) +
+    theme(aspect.ratio = 2) ) %>% 
+  cowplot::plot_grid(plotlist = ., nrow = 1, align = 'v')
+ggsave("taxa.div.alpha.pdf", width = 8, height = 3)
+
+#### beta div ####
+plot_PCoA(profile, group, group_order = comparison, group_color = colors, 
+          lab_size = 3, ellipse_level = .75, show_legend = T, show_grid = F, 
+          show_line = F, display_type = 'line')
+ggsave("taxa.div.beta.pdf", width = 5, height = 3.5)
+
+#### diff ####
+map(c('phylum', 'family', 'genus', 'species'), ~
+      taxa_trans(profile, taxa, group, to = .x, out_all = T, transRA = T) %>% 
+      difference_analysis(group, comparison = comparison, method = 'wilcox', 
+                          add_enriched = T, log2fc = 0, pvalue = 0.05) ) %>% 
+  set_names(c('phylum', 'family', 'genus', 'species')) %>% 
+  write.xlsx('taxa.diffs.xlsx')
+
+#### path ####
+group <- read.delim("../data/group.tsv")
+profile <- read.delim("../data/table_path.tsv", row.names = 1)
+
+data <- difference_analysis(profile, group, comparison = comparison, method = 'wilcox', 
+                            add_enriched = T, log2fc = 0, pvalue = 0.05)
+  
+write.xlsx(data, 'path.diffs.xlsx')
+
+#### KO/lvA/lvB/lvC ####
+KO_info <- read.delim('/database/KEGG/v20230401/KO_level_A_B_C_D_Description')
+
+group <- read.delim("../data/group.tsv")
+profile <- read.delim("../data/table_KO.tsv", row.names = 1)
+
+data <- difference_analysis(profile, group, comparison = comparison, method = 'wilcox', 
+                            add_enriched = T, log2fc = 0, pvalue = 0.05) %>% 
+  mutate(KO_info = KO_info$lvDdes[match(name, KO_info$lvD)])
+write.xlsx(data, 'KO.diffs.xlsx')
+
+data <- map(c('A', 'B', 'C'), ~
+              profile_KEGG_convert(profile, to = .x) %>% 
+              difference_analysis(group, comparison = comparison, method = 'wilcox', 
+                                  add_enriched = T, log2fc = 0, pvalue = 0.05) %>% 
+              left_join(KO_info %>% 
+                          select(all_of(paste0('lv', .x, c('', 'des')))) %>% 
+                          distinct(), 
+                        by = c('name' = paste0('lv', .x))) ) %>% 
+  set_names(paste0('lv', c('A', 'B', 'C')))
+write.xlsx(data, 'KO_lvABC.diffs.xlsx')
+```
+
+#### LiH_2020
+
+```{R}
+#### info ####
+colors <- c("#66c2a5","#fc8d62","#8da0cb","#e78ac3","#a6d854","#ffd92f",
+            "#8dd3c7","#fdb462","#80b1d3","#fccde5","#d9ef8b","#fee391")
+
+group <- read.delim("../data/group.tsv")
+
+profile <- read.delim("../data/table_taxa.tsv", row.names = 1, check.names = F) %>% 
+  profile_filter(by_group = F, min_n = 2) %>% 
+  profile_transRA()
+
+taxa <- read.delim("../data/taxonomy.tsv") %>% 
+  filter(name %in% rownames(profile)) 
+
+tr <- treeio::read.tree('../data/tree.nwk')
+
+comparisons <- list('feces_PDCoV_vs_HC' = c('PDCoV_feces', 'HC_feces'),
+                    'intestine_PDCoV_vs_HC' = c('PDCoV_intestine', 'HC_intestine'))
+
+#### alpha div ####
+map(comparisons, \(x) {
+  group_x <- filter(group, group %in% x)
+  profile_x <- select(profile, all_of(group_x$sample))
+  
+  map(c('pd', 'shannon', 'richness', 'ace'), ~
+        calcu_alpha(profile_x, method = .x, tree = tr) %>% 
+        left_join(group_x, by = 'sample') %>% 
+        mutate(group = factor(group, x)) %>% 
+        ggboxplot('group', 'value', fill = 'group', palette = colors, 
+                  legend = 'none', outlier.size = 1, xlab = "",  
+                  ylab = paste0(.x, ' index'), x.text.angle = 30) +
+        stat_compare_means(comparisons = list(x), label = "p.signif", 
+                           step.increase = .06, vjust = .7, tip.length = .02) +
+        theme(aspect.ratio = 2) ) %>% 
+    cowplot::plot_grid(plotlist = ., nrow = 1, align = 'v')  } ) %>% 
+  cowplot::plot_grid(plotlist = ., ncol = 1, align = 'h')
+ggsave("taxa.div.alpha.pdf", width = 8, height = 6)
+
+#### beta div ####
+map(comparisons, \(x) {
+  group_x <- filter(group, group %in% x)
+  profile_x <- select(profile, all_of(group_x$sample))
+  
+  plot_PCoA(profile_x, group_x, group_order = x, group_color = colors, 
+            lab_size = 3, ellipse_level = .75, show_legend = T, show_grid = F, 
+            show_line = F, display_type = 'line')  } ) %>% 
+  cowplot::plot_grid(plotlist = ., nrow = 1, align = 'h')
+ggsave("taxa.div.beta.pdf", width = 10, height = 3.5)
+
+#### diff ####
+for (i in seq_len(2)) {
+  group_x <- filter(group, group %in% comparisons[[i]])
+  profile_x <- select(profile, all_of(group_x$sample))
+  
+  map(c('phylum', 'family', 'genus', 'species'), ~
+        taxa_trans(profile_x, taxa, group_x, to = .x, out_all = T, transRA = T) %>% 
+        difference_analysis(group_x, comparison = comparisons[[i]], method = 'wilcox', 
+                            add_enriched = T, log2fc = 0, pvalue = 0.05) ) %>% 
+    set_names(c('phylum', 'family', 'genus', 'species') ) %>% 
+    write.xlsx(paste0('taxa.', names(comparisons)[i], '.diffs.xlsx'))
+  }
+
+#### taxa maaslin2 ####
+library(Maaslin2)
+
+data <- taxa_trans(profile, taxa, to = 'species', out_all = T, transRA = T) %>% 
+  profile_filter(min_prevalence = .1, by_group = F)
+
+group_x <- group %>% 
+  mutate(isolation = map_vec(strsplit(group, '_'), ~ .x[2]),
+         group = map_vec(strsplit(group, '_'), ~ .x[1])) %>% 
+  arrange(match(sample, colnames(data))) %>% 
+  column_to_rownames('sample')
+
+# 固定效应是是否攻毒以及时间和分离位置
+Maaslin2(data, group_x, output = 'taxa.maaslin2_species_out', analysis_method = "LM",
+         normalization = 'NONE', transform = 'LOG', correction = 'bonferroni', 
+         fixed_effects = c('group', 'isolation', 'date'), 
+         reference = 'group,HC', save_models = T, save_scatter = T)
+
+#### path ####
+group <- read.delim("../data/group.tsv")
+profile <- read.delim("../data/table_path.tsv", row.names = 1)
+
+data <- map(comparisons, \(x) {
+  group_x <- filter(group, group %in% x)
+  profile_x <- select(profile, all_of(group_x$sample))
+  
+  difference_analysis(profile_x, group_x, comparison = x, method = 'wilcox', 
+                      add_enriched = T, log2fc = 0, pvalue = 0.05)  } )
+write.xlsx(data, 'path.diffs.xlsx')
+
+#### KO/lvA/lvB/lvC ####
+KO_info <- read.delim('/database/KEGG/v20230401/KO_level_A_B_C_D_Description')
+
+group <- read.delim("../data/group.tsv")
+profile <- read.delim("../data/table_KO.tsv", row.names = 1)
+
+data <- map(comparisons, \(x) {
+  group_x <- filter(group, group %in% x)
+  profile_x <- select(profile, all_of(group_x$sample))
+  
+  difference_analysis(profile, group, comparison = x, method = 'wilcox', 
+                      add_enriched = T, log2fc = 0, pvalue = 0.05) %>% 
+    mutate(KO_info = KO_info$lvDdes[match(name, KO_info$lvD)])  } )
+write.xlsx(data, 'KO.diffs.xlsx')
+
+for (i in seq_len(2)) {
+  group_x <- filter(group, group %in% comparisons[[i]])
+  profile_x <- select(profile, all_of(group_x$sample))
+  
+  map(c('A', 'B', 'C'), ~
+        profile_KEGG_convert(profile_x, to = .x) %>% 
+        difference_analysis(group_x, comparison = comparisons[[i]], method = 'wilcox', 
+                            add_enriched = T, log2fc = 0, pvalue = 0.05) %>% 
+        left_join(KO_info %>% 
+                    select(all_of(paste0('lv', .x, c('', 'des')))) %>% 
+                    distinct(), 
+                  by = c('name' = paste0('lv', .x))) ) %>% 
+    set_names(paste0('lv', c('A', 'B', 'C'))) %>% 
+    write.xlsx(paste0('KO_lvABC.', names(comparisons)[i], '.diffs.xlsx'))
+}
+
+#### KO lvC maaslin2 ####
+library(Maaslin2)
+
+data <- read.delim("../data/table_KO.tsv", row.names = 1) %>% 
+  profile_KEGG_convert(to = 'C')
+
+group_x <- group %>% 
+  mutate(isolation = map_vec(strsplit(group, '_'), ~ .x[2]),
+         group = map_vec(strsplit(group, '_'), ~ .x[1])) %>% 
+  arrange(match(sample, colnames(data))) %>% 
+  column_to_rownames('sample')
+
+# 固定效应是是否攻毒以及时间和分离位置
+Maaslin2(data, group_x, output = 'KO.maaslin2_lvC_out', analysis_method = "LM",
+         normalization = 'NONE', transform = 'LOG', correction = 'bonferroni', 
+         fixed_effects = c('group', 'isolation', 'date'), 
+         reference = 'group,HC', save_models = T, save_scatter = T)
+
+
+#### KO maaslin2 ####
+library(Maaslin2)
+
+data <- read.delim("../data/table_KO.tsv", row.names = 1) %>% 
+  profile_filter(min_prevalence = .05)
+
+group_x <- group %>% 
+  mutate(isolation = map_vec(strsplit(group, '_'), ~ .x[2]),
+         group = map_vec(strsplit(group, '_'), ~ .x[1])) %>% 
+  arrange(match(sample, colnames(data))) %>% 
+  column_to_rownames('sample')
+
+# 固定效应是是否攻毒以及时间和分离位置
+Maaslin2(data, group_x, output = 'KO.maaslin2_out', analysis_method = "LM",
+         normalization = 'NONE', transform = 'LOG', correction = 'bonferroni', 
+         fixed_effects = c('group', 'isolation'), 
+         reference = 'group,HC', save_models = T, save_scatter = T)
+```
+
+#### SuY_2021.PWD
+
+```{R}
+#### info ####
+colors <- c("#66c2a5","#fc8d62","#8da0cb","#e78ac3","#a6d854","#ffd92f",
+            "#8dd3c7","#fdb462","#80b1d3","#fccde5","#d9ef8b","#fee391")
+
+group <- read.delim("../data/group.tsv")
+
+profile <- read.delim("../data/table_taxa.tsv", row.names = 1, check.names = F) %>% 
+  profile_filter(by_group = F, min_n = 2) %>% 
+  profile_transRA()
+
+taxa <- read.delim("../data/taxonomy.tsv") %>% 
+  filter(name %in% rownames(profile)) 
+
+tr <- treeio::read.tree('../data/tree.nwk')
+
+comparisons <- list('D34_Dia_vs_HC' = c('D34_Dia', 'D34_HC'),
+                    'D38_Dia_vs_HC' = c('D38_Dia', 'D38_HC'),
+                    'D66_Dia_vs_HC' = c('D66_Dia', 'D66_HC'))
+
+#### alpha div ####
+map(comparisons, \(x) {
+  group_x <- filter(group, group %in% x)
+  profile_x <- select(profile, all_of(group_x$sample))
+  
+  map(c('pd', 'shannon', 'richness', 'ace'), ~
+        calcu_alpha(profile_x, method = .x, tree = tr) %>% 
+        left_join(group_x, by = 'sample') %>% 
+        mutate(group = factor(group, x)) %>% 
+        ggboxplot('group', 'value', fill = 'group', palette = colors, 
+                  legend = 'none', outlier.size = 1, xlab = "",  
+                  ylab = paste0(.x, ' index'), x.text.angle = 30) +
+        stat_compare_means(comparisons = list(x), label = "p.signif", 
+                           step.increase = .06, vjust = .7, tip.length = .02) +
+        theme(aspect.ratio = 2) ) %>% 
+    cowplot::plot_grid(plotlist = ., nrow = 1, align = 'v')  } ) %>% 
+  cowplot::plot_grid(plotlist = ., ncol = 1, align = 'h')
+ggsave("taxa.div.alpha.pdf", width = 8, height = 9)
+
+#### beta div ####
+map(comparisons, \(x) {
+  group_x <- filter(group, group %in% x)
+  profile_x <- select(profile, all_of(group_x$sample))
+  
+  plot_PCoA(profile_x, group_x, group_order = x, group_color = colors,
+            lab_size = 3, ellipse_level = .75, show_legend = F, show_grid = F, 
+            show_line = F, display_type = 'line', add_group_label = T)  } ) %>% 
+  cowplot::plot_grid(plotlist = ., nrow = 1, align = 'h')
+ggsave("taxa.div.beta.pdf", width = 12, height = 3.5)
+
+#### diff ####
+for (i in seq_len(3)) {
+  group_x <- filter(group, group %in% comparisons[[i]])
+  profile_x <- select(profile, all_of(group_x$sample))
+  
+  map(c('phylum', 'family', 'genus', 'species'), ~
+        taxa_trans(profile_x, taxa, group_x, to = .x, out_all = T, transRA = T) %>% 
+        difference_analysis(group_x, comparison = comparisons[[i]], method = 'wilcox', 
+                            add_enriched = T, log2fc = 0, pvalue = 0.05) ) %>% 
+    set_names(c('phylum', 'family', 'genus', 'species') ) %>% 
+    write.xlsx(paste0('taxa.', names(comparisons)[i], '.diffs.xlsx'))
+  }
+
+#### taxa maaslin2 ####
+library(Maaslin2)
+
+group_x <- group %>% 
+  filter(group != 'HC') %>% 
+  mutate(date = map_vec(strsplit(group, '_'), ~ .x[1]),
+         group = map_vec(strsplit(group, '_'), ~ .x[2])) %>% 
+  filter(group != 'FMT') %>% 
+  column_to_rownames('sample')
+
+data <- taxa_trans(profile, taxa, to = 'genus', out_all = T, transRA = T) %>% 
+  profile_filter(min_prevalence = .1, by_group = F) %>% 
+  select(all_of(rownames(group_x)))
+
+# 固定效应是是否攻毒以及时间和分离位置
+Maaslin2(data, group_x, output = 'taxa.maaslin2_genus_out', analysis_method = "LM",
+         normalization = 'NONE', transform = 'LOG', correction = 'bonferroni', 
+         fixed_effects = c('group', 'date'), 
+         reference = 'group,HC;date,D34', save_models = T, save_scatter = T)
+
+#### path ####
+group <- read.delim("../data/group.tsv")
+profile <- read.delim("../data/table_path.tsv", row.names = 1)
+
+data <- map(comparisons, \(x) {
+  group_x <- filter(group, group %in% x)
+  profile_x <- select(profile, all_of(group_x$sample))
+  
+  difference_analysis(profile_x, group_x, comparison = x, method = 'wilcox', 
+                      add_enriched = T, log2fc = 0, pvalue = 0.05)  } )
+write.xlsx(data, 'path.diffs.xlsx')
+
+#### KO/lvA/lvB/lvC ####
+KO_info <- read.delim('/database/KEGG/v20230401/KO_level_A_B_C_D_Description')
+
+group <- read.delim("../data/group.tsv")
+profile <- read.delim("../data/table_KO.tsv", row.names = 1)
+
+data <- map(comparisons, \(x) {
+  group_x <- filter(group, group %in% x)
+  profile_x <- select(profile, all_of(group_x$sample))
+  
+  difference_analysis(profile, group, comparison = x, method = 'wilcox', 
+                      add_enriched = T, log2fc = 0, pvalue = 0.05) %>% 
+    mutate(KO_info = KO_info$lvDdes[match(name, KO_info$lvD)])  } )
+write.xlsx(data, 'KO.diffs.xlsx')
+
+for (i in seq_len(3)) {
+  group_x <- filter(group, group %in% comparisons[[i]])
+  profile_x <- select(profile, all_of(group_x$sample))
+  
+  map(c('A', 'B', 'C'), ~
+        profile_KEGG_convert(profile_x, to = .x) %>% 
+        difference_analysis(group_x, comparison = comparisons[[i]], method = 'wilcox', 
+                            add_enriched = T, log2fc = 0, pvalue = 0.05) %>% 
+        left_join(KO_info %>% 
+                    select(all_of(paste0('lv', .x, c('', 'des')))) %>% 
+                    distinct(), 
+                  by = c('name' = paste0('lv', .x))) ) %>% 
+    set_names(paste0('lv', c('A', 'B', 'C'))) %>% 
+    write.xlsx(paste0('KO_lvABC.', names(comparisons)[i], '.diffs.xlsx'))
+}
+
+#### taxa maaslin2 ####
+library(Maaslin2)
+
+group_x <- group %>% 
+  filter(group != 'HC') %>% 
+  mutate(date = map_vec(strsplit(group, '_'), ~ .x[1]),
+         group = map_vec(strsplit(group, '_'), ~ .x[2])) %>% 
+  filter(group != 'FMT') %>% 
+  column_to_rownames('sample')
+
+data <- read.delim("../data/table_KO.tsv", row.names = 1) %>% 
+  select(all_of(rownames(group_x)))
+
+# 固定效应是是否攻毒以及时间和分离位置
+Maaslin2(data, group_x, output = 'func.maaslin2_KO_out', analysis_method = "LM",
+         normalization = 'NONE', transform = 'LOG', correction = 'bonferroni', 
+         fixed_effects = c('group', 'date'), 
+         reference = 'group,HC;date,D34', save_models = T, save_scatter = T)
+```
+
+#### YangQ_2017
+
+```{R}
+#### info ####
+colors <- c("#66c2a5","#fc8d62","#8da0cb","#e78ac3","#a6d854","#ffd92f",
+            "#8dd3c7","#fdb462","#80b1d3","#fccde5","#d9ef8b","#fee391")
+
+group <- read.delim("../data/group.tsv")
+
+profile <- read.delim("../data/table_taxa.tsv", row.names = 1, check.names = F) %>% 
+  profile_filter(by_group = F, min_n = 2) %>% 
+  profile_transRA()
+
+taxa <- read.delim("../data/taxonomy.tsv") %>% 
+  filter(name %in% rownames(profile))
+
+tr <- treeio::read.tree('../data/tree.nwk')
+
+comparison <- c('PWD', 'HC')
+
+#### alpha div ####
+map(c('pd', 'shannon', 'richness', 'ace'), ~
+  calcu_alpha(profile, method = .x, tree = tr) %>% 
+    left_join(group, by = 'sample') %>% 
+    mutate(group = factor(group, comparison)) %>% 
+    ggboxplot('group', 'value', fill = 'group', palette = colors, 
+            legend = 'none', outlier.size = 1, xlab = "",  
+            ylab = paste0(.x, ' index')) +
+    stat_compare_means(comparisons = list(comparison), label = "p.signif", 
+                       step.increase = .06, vjust = .7, tip.length = .02) +
+    theme(aspect.ratio = 2) ) %>% 
+  cowplot::plot_grid(plotlist = ., nrow = 1, align = 'v')
+ggsave("taxa.div.alpha.pdf", width = 8, height = 3)
+
+#### beta div ####
+plot_PCoA(profile, group, group_order = comparison, group_color = colors, 
+          lab_size = 3, ellipse_level = .75, show_legend = F, show_grid = F, 
+          show_line = F, display_type = 'line', add_group_label = T)
+ggsave("taxa.div.beta.pdf", width = 5, height = 4)
+
+#### diff ####
+map(c('phylum', 'family', 'genus', 'species'), ~
+      taxa_trans(profile, taxa, group, to = .x, out_all = T, transRA = T) %>% 
+      difference_analysis(group, comparison = comparison, method = 'wilcox', 
+                          add_enriched = T, log2fc = 0, pvalue = 0.05) ) %>% 
+  set_names(c('phylum', 'family', 'genus', 'species')) %>% 
+  write.xlsx('taxa.diffs.xlsx')
+
+#### path ####
+group <- read.delim("../data/group.tsv")
+profile <- read.delim("../data/table_path.tsv", row.names = 1)
+
+data <- difference_analysis(profile, group, comparison = comparison, method = 'wilcox', 
+                            add_enriched = T, log2fc = 0, pvalue = 0.05)
+  
+write.xlsx(data, 'path.diffs.xlsx')
+
+#### KO/lvA/lvB/lvC ####
+KO_info <- read.delim('/database/KEGG/v20230401/KO_level_A_B_C_D_Description')
+
+group <- read.delim("../data/group.tsv")
+profile <- read.delim("../data/table_KO.tsv", row.names = 1)
+
+data <- difference_analysis(profile, group, comparison = comparison, method = 'wilcox', 
+                            add_enriched = T, log2fc = 0, pvalue = 0.05) %>% 
+  mutate(KO_info = KO_info$lvDdes[match(name, KO_info$lvD)])
+write.xlsx(data, 'KO.diffs.xlsx')
+
+data <- map(c('A', 'B', 'C'), ~
+              profile_KEGG_convert(profile, to = .x) %>% 
+              difference_analysis(group, comparison = comparison, method = 'wilcox', 
+                                  add_enriched = T, log2fc = 0, pvalue = 0.05) %>% 
+              left_join(KO_info %>% 
+                          select(all_of(paste0('lv', .x, c('', 'des')))) %>% 
+                          distinct(), 
+                        by = c('name' = paste0('lv', .x))) ) %>% 
+  set_names(paste0('lv', c('A', 'B', 'C')))
+write.xlsx(data, 'KO_lvABC.diffs.xlsx')
+```
+
+#### YangS_2020
+
+```{R}
+#### info ####
+colors <- c("#66c2a5","#fc8d62","#8da0cb","#e78ac3","#a6d854","#ffd92f",
+            "#8dd3c7","#fdb462","#80b1d3","#fccde5","#d9ef8b","#fee391")
+
+group <- read.delim("../data/group.tsv")
+
+profile <- read.delim("../data/table_taxa.tsv", row.names = 1, check.names = F) %>% 
+  profile_filter(by_group = F, min_n = 2) %>% 
+  profile_transRA()
+
+taxa <- read.delim("../data/taxonomy.tsv") %>% 
+  filter(name %in% rownames(profile)) 
+
+tr <- treeio::read.tree('../data/tree.nwk')
+
+comparisons <- list('du_1w_PEDV_vs_HC' = c('PEDV_du_1w', 'HC_du_1w'),
+                    'il_1w_PEDV_vs_HC' = c('PEDV_il_1w', 'HC_il_1w'),
+                    'je_1w_PEDV_vs_HC' = c('PEDV_je_1w', 'HC_je_1w'),
+                    'du_2w_PEDV_vs_HC' = c('PEDV_du_2w', 'HC_du_2w'),
+                    'il_2w_PEDV_vs_HC' = c('PEDV_il_2w', 'HC_il_2w'),
+                    'je_2w_PEDV_vs_HC' = c('PEDV_je_2w', 'HC_je_2w'),
+                    'du_4w_PEDV_vs_HC' = c('PEDV_du_4w', 'HC_du_4w'),
+                    'il_4w_PEDV_vs_HC' = c('PEDV_il_4w', 'HC_il_4w'),
+                    'je_4w_PEDV_vs_HC' = c('PEDV_je_4w', 'HC_je_4w'))
+
+#### alpha div ####
+map(comparisons, \(x) {
+  group_x <- filter(group, group %in% x)
+  profile_x <- select(profile, all_of(group_x$sample))
+  
+  map(c('pd', 'shannon', 'richness', 'ace'), ~
+        calcu_alpha(profile_x, method = .x, tree = tr) %>% 
+        left_join(group_x, by = 'sample') %>% 
+        mutate(group = factor(group, x)) %>% 
+        ggboxplot('group', 'value', fill = 'group', palette = colors, 
+                  legend = 'none', outlier.size = 1, xlab = "",  
+                  ylab = paste0(.x, ' index'), x.text.angle = 30) +
+        stat_compare_means(comparisons = list(x), label = "p.signif", 
+                           step.increase = .06, vjust = .7, tip.length = .02) +
+        theme(aspect.ratio = 2) ) %>% 
+    cowplot::plot_grid(plotlist = ., nrow = 1, align = 'v')  } ) %>% 
+  cowplot::plot_grid(plotlist = ., ncol = 1, align = 'h')
+ggsave("taxa.div.alpha.pdf", width = 8, height = 27)
+
+#### beta div ####
+map(comparisons, \(x) {
+  group_x <- filter(group, group %in% x)
+  profile_x <- select(profile, all_of(group_x$sample))
+  
+  plot_PCoA(profile_x, group_x, group_order = x, group_color = colors,
+            lab_size = 3, ellipse_level = .75, show_legend = F, show_grid = F, 
+            show_line = F, display_type = 'line', add_group_label = T)  } ) %>% 
+  cowplot::plot_grid(plotlist = ., nrow = 3, align = 'h')
+ggsave("taxa.div.beta.pdf", width = 12, height = 11.5)
+
+#### diff ####
+for (i in seq_len(9)) {
+  group_x <- filter(group, group %in% comparisons[[i]])
+  profile_x <- select(profile, all_of(group_x$sample))
+  
+  map(c('phylum', 'family', 'genus', 'species'), ~
+        taxa_trans(profile_x, taxa, group_x, to = .x, out_all = T, transRA = T) %>% 
+        difference_analysis(group_x, comparison = comparisons[[i]], method = 'wilcox', 
+                            add_enriched = T, log2fc = 0, pvalue = 0.05) ) %>% 
+    set_names(c('phylum', 'family', 'genus', 'species') ) %>% 
+    write.xlsx(paste0('taxa.', names(comparisons)[i], '.diffs.xlsx'))
+  }
+
+#### taxa maaslin2 ####
+library(Maaslin2)
+
+data <- taxa_trans(profile, taxa, to = 'species', out_all = T, transRA = T) %>% 
+  profile_filter(min_prevalence = .1, by_group = F)
+
+group_x <- dplyr::select(group, sample, group, isolation, date) %>% 
+  mutate(group = map_vec(strsplit(group, '_'), ~ .x[1]),
+         group = factor(group, c('HC', 'PEDV')),
+         date = as.numeric(gsub('w', '', date))) %>% 
+  arrange(match(sample, colnames(data))) %>% 
+  column_to_rownames('sample')
+
+# 固定效应是是否攻毒以及时间和分离位置
+Maaslin2(data, group_x, output = 'taxa.maaslin2_species_out', analysis_method = "LM",
+         normalization = 'NONE', transform = 'LOG', correction = 'bonferroni', 
+         fixed_effects = c('group', 'isolation', 'date'), 
+         reference = 'isolation,duodenum', save_models = T, save_scatter = T)
+
+
+#### path ####
+group <- read.delim("../data/group.tsv")
+profile <- read.delim("../data/table_path.tsv", row.names = 1)
+
+data <- map(comparisons, \(x) {
+  group_x <- filter(group, group %in% x)
+  profile_x <- select(profile, all_of(group_x$sample))
+  
+  difference_analysis(profile_x, group_x, comparison = x, method = 'wilcox', 
+                      add_enriched = T, log2fc = 0, pvalue = 0.05)  } )
+write.xlsx(data, 'path.diffs.xlsx')
+
+#### KO/lvA/lvB/lvC ####
+KO_info <- read.delim('/database/KEGG/v20230401/KO_level_A_B_C_D_Description')
+
+group <- read.delim("../data/group.tsv")
+profile <- read.delim("../data/table_KO.tsv", row.names = 1)
+
+data <- map(comparisons, \(x) {
+  group_x <- filter(group, group %in% x)
+  profile_x <- select(profile, all_of(group_x$sample))
+  
+  difference_analysis(profile, group, comparison = x, method = 'wilcox', 
+                      add_enriched = T, log2fc = 0, pvalue = 0.05) %>% 
+    mutate(KO_info = KO_info$lvDdes[match(name, KO_info$lvD)])  } )
+write.xlsx(data, 'KO.diffs.xlsx')
+
+for (i in seq_len(9)) {
+  group_x <- filter(group, group %in% comparisons[[i]])
+  profile_x <- select(profile, all_of(group_x$sample))
+  
+  map(c('A', 'B', 'C'), ~
+        profile_KEGG_convert(profile_x, to = .x) %>% 
+        difference_analysis(group_x, comparison = comparisons[[i]], method = 'wilcox', 
+                            add_enriched = T, log2fc = 0, pvalue = 0.05) %>% 
+        left_join(KO_info %>% 
+                    select(all_of(paste0('lv', .x, c('', 'des')))) %>% 
+                    distinct(), 
+                  by = c('name' = paste0('lv', .x))) ) %>% 
+    set_names(paste0('lv', c('A', 'B', 'C'))) %>% 
+    write.xlsx(paste0('KO_lvABC.', names(comparisons)[i], '.diffs.xlsx'))
+}
+
+
+#### KO lvC maaslin2 ####
+library(Maaslin2)
+
+data <- read.delim("../data/table_KO.tsv", row.names = 1) %>% 
+  profile_KEGG_convert(to = 'C')
+
+group_x <- dplyr::select(group, sample, group, isolation, date) %>% 
+  mutate(group = map_vec(strsplit(group, '_'), ~ .x[1]),
+         group = factor(group, c('HC', 'PEDV')),
+         date = as.numeric(gsub('w', '', date))) %>% 
+  arrange(match(sample, colnames(data))) %>% 
+  column_to_rownames('sample')
+
+# 固定效应是是否攻毒以及时间和分离位置
+Maaslin2(data, group_x, output = 'KO.maaslin2_lvC_out', analysis_method = "LM",
+         normalization = 'NONE', transform = 'LOG', correction = 'bonferroni', 
+         fixed_effects = c('group', 'isolation', 'date'), 
+         reference = 'isolation,duodenum', save_models = T, save_scatter = T)
+
+#### KO maaslin2 ####
+library(Maaslin2)
+
+data <- read.delim("../data/table_KO.tsv", row.names = 1)
+
+group_x <- dplyr::select(group, sample, group, isolation, date) %>% 
+  mutate(group = map_vec(strsplit(group, '_'), ~ .x[1]),
+         group = factor(group, c('HC', 'PEDV')),
+         isolation = factor(isolation),
+         date = as.numeric(gsub('w', '', date))) %>% 
+  arrange(match(sample, colnames(data))) %>% 
+  column_to_rownames('sample')
+
+# 固定效应是是否攻毒以及时间和分离位置
+Maaslin2(data, group_x, output = 'KO.maaslin2_out', analysis_method = "LM",
+         normalization = 'NONE', transform = 'LOG', correction = 'bonferroni', 
+         fixed_effects = c('group', 'isolation', 'date'), 
+         reference = 'isolation,duodenum;group,HC', save_models = T, save_scatter = T)
+```

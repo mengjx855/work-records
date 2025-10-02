@@ -1,0 +1,325 @@
+---
+title: "scRNASeq SFTS Homo PBMC in public datasets LiJL - IDO / AHR - focus on dendritic cells"
+author: "Jinxin Meng"
+date: "2025-08-30"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## LiH_2021
+
+```{R}
+#### DCs ####
+seurat <- readRDS('../../20250707/LiH_2021/seurat.out.rds')
+seurat$cell <- seurat@active.ident
+seurat <- subset(seurat, cell == 'Dendritic_cell')
+# re-analysis
+seurat <- CreateSeuratObject(counts = seurat[["RNA"]]$count)
+seurat <- NormalizeData(seurat, normalization.method = 'LogNormalize', scale.factor = 1e4, verbose = T)
+seurat <- FindVariableFeatures(seurat, selection.method = 'vst', nfeatures = 2000)
+seurat <- ScaleData(seurat)
+seurat <- RunPCA(seurat, features = VariableFeatures(seurat))
+ElbowPlot(seurat, ndims = 30) # 流石图协助选择PC维度 10
+seurat <- RunHarmony(seurat, 'orig.ident') # Harmony去批次
+seurat <- RunUMAP(seurat, dims = 1:10, reduction = 'harmony')
+seurat <- RunTSNE(seurat, dims = 1:10, reduction = 'harmony')
+seurat <- FindNeighbors(seurat, reduction = 'harmony', dims = 1:10)
+seurat <- FindClusters(seurat, resolution = c(seq(0, .9, .2)))
+
+plots <- map2(paste0('RNA_snn_res.', seq(0, .9, .2)), paste0('SNN: ', seq(0, .9, .2)), ~
+                DimPlot(seurat, reduction = 'tsne', group.by = .x, label = T) +
+                ggtitle(.y) + theme(aspect.ratio = 1) + guides(color = 'none')) 
+plot_grid(plotlist = plots, nrow = 1)
+ggsave('tsne.SNN.dimplot.pdf', width = 20, height = 4)
+
+# 细胞基因标记
+markers <- list(
+  # CD8_T = c('CD3D','CD8A','CD8B','CD3E','CD3'), 
+  # CD4_T = c('CD3D','CD4','IL7R','LTB','CD3'), 
+  # gdT = c('TRDV2','TRGV9'),
+  # NK = c('NCAM1','KLRF1','FGFBP2','FCG3RA','CX3CR1','GNLY','NKG7','TYOBP','PRF1'), 
+  # B = c('CD19','CD79A','CD79B','MS4A1'), # CD20->MS4A1
+  # Plasmablast = c('XBP1','RF4','PRDM1','PAX5'), # 浆母细胞
+  # Plasma_cell = c('CD79A','IGHG1','MZB1','SDC1'), # 浆细胞
+  # Neutrophils = c('FCGR3B','MMP9','CST3','LYZ','CSF3R'),
+  CD14_monocyte = c('CD14','LYZ','CD33','FCN1'),
+  CD16_monocyte = c('CD14','FCGR3A','CD33','LYN'), # FCGR3A -> CD
+  # M1_Macrophage = c('CD80','CD86','INOS'), # 经典激活型巨噬细胞 classically activated macrophages
+  # M2_Macrophage = c('CD163','MRC1'), # 交替激活型巨噬细胞 alternatively activated macrophages
+  # Endothelial_cell = c('PTPRB','PECAM1'),
+  # Platelet = c('PPBP','ITGA2B'), # 血小板
+  # Epithelial_cell = c('EPCAM','CK13','CK5'), # 上皮细胞
+  # Erythroblast = c('MKI67','HBA1','HBB'), # 成红血细胞
+  # HSC = c('NRIP1','MECOM','PROM1','NKAIN2','CD34'), # Hematopoietic Stem Cell 造血干细胞
+  cDC1 = c('CLEC9A','CADM1','THBD','LY75','XCR1','ITGAX'), # 传统树突状细胞1
+  cDC2 = c('ITGAX','BTLA','FCER1A','CD1C','ITGAM','SIRPA','CD5'), # 传统树突状细胞2
+  pDC = c('ITGAX','IL3RA','CLEC4C','NRP1','PTPRC','CCR2','CXCR3','LILRA4'), # 浆细胞样树突状细胞
+  MoDC = c('ITGAX','CD1C','ITGAM','CD14','FCGR1A','MRC1','SIRPA','CD1A','CCR2'),
+  DC3 = c('FCER1A','CD1C','CD163','CD14')
+)
+
+# featureplot
+markers <- map(markers, \(x) x[x %in% rownames(seurat)])
+max_len <- map_vec(markers, ~ length(.x)) %>% max()
+plots <- map2(markers, names(markers), \(x, y) {
+  p_text <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold',
+                        label = stringr::str_to_title(gsub('_', ' ', y))) + 
+                   theme_void())
+  p_feats <- map(x, ~ FeaturePlot(seurat, reduction = 'tsne', features = .x) +
+                   theme(aspect.ratio = 1))
+  p_void <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold') + 
+                   theme_void())
+  cowplot::plot_grid(plotlist = c(p_text, p_feats, rep(p_void, times = max_len - length(x))),
+                     nrow = 1) } )
+cowplot::plot_grid(plotlist = plots, align = 'v', ncol = 1)
+ggsave('tsne.featureplot.pdf', width = 4.5 * (max_len + 1), 
+       height = 4.5 * length(markers), limitsize = F)
+
+seurat <- SetIdent(seurat, value = 'RNA_snn_res.0.2')
+DimPlot(seurat, reduction = 'tsne', label = T, alpha = 1, raster = F) + 
+  NoLegend() + theme(aspect.ratio = 1)
+ggsave('tsne.SNN.0.2.dimplot.pdf', width = 6, height = 6)
+
+# 鉴定每个cluster中的marker
+allmarkers <- FindAllMarkers(seurat, only.pos = T, min.pct = 0.25, logfc.threshold = 0.25)
+write.xlsx(allmarkers, 'allmarkers.cluster.xlsx')
+
+#### 细胞注释 ####
+plot_data <- FetchData(seurat, vars = c('CLEC9A','CADM1','THBD','LY75','XCR1','BTLA','FCER1A', 'CD5',
+                                        'IL3RA','CLEC4C','NRP1','PTPRC','CXCR3','LILRA4','ITGAX',
+                                        'CD1C','ITGAM','CD14','FCGR1A','MRC1','SIRPA','CD1A','CCR2')) %>% 
+  add_column(cell = seurat@active.ident) %>% 
+  gather(key = 'gene', value = 'value', -cell)
+
+ggplot(plot_data, aes(cell, value), color = factor(cell)) +
+  geom_violin(aes(fill = cell), scale ='width') +
+  facet_grid(gene ~ ., scales = 'free_y') +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_fill_manual(values = pald('rainbow3', 14)) +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        axis.title = element_blank(),
+        axis.ticks.length = unit(1.6, 'mm'),
+        axis.ticks.y = element_blank(),
+        axis.text = element_text(color = 'black', size = 10),
+        axis.text.y = element_blank(),
+        legend.position = 'none',
+        panel.spacing.y = unit(0, 'cm'),
+        strip.text.y = element_text(angle = 0, size = 12, hjust = 0, face = 'italic'),
+        strip.background.y = element_blank())
+ggsave('violinplot.cluster.DCs.pdf', width = 4, height = 10)
+
+# marker自动注释
+map(markers, ~ filter(allmarkers, gene %in% .x) ) %>% 
+  keep(~ nrow(.x) != 0) %>% 
+  map(~ group_by(.x, cluster) %>% 
+        group_modify(~ data.frame(match_n = nrow(.x), 
+                                  genes = paste(.x$gene, collapse = ',')))) %>% 
+  map2_df(names(.), ~ add_column(.x, gene = .y, .before = 1)) %>% 
+  data.frame() %>% 
+  arrange(cluster)
+
+seurat <- RenameIdents(seurat,
+                       '0' = 'Other', '1' = 'Other', '2' = 'pDC', 
+                       '3' = 'Other', '4' = 'Other', '5' = 'MoDC',
+                       '6' = 'Other', '7' = 'cDC1', '8' = 'Other')
+
+# 可视化
+DimPlot(seurat, reduction = 'tsne', label = T, alpha = 1, cols = 'Set3', raster = F) + 
+  theme(aspect.ratio = 1) + NoLegend()
+ggsave('tsne.marker.dimplot.pdf', width = 6, height = 6)
+```
+
+## ParkA_2021
+
+```{R}
+#### DCs ####
+seurat <- readRDS('../../20250707/ParkA_2021/seurat.out.rds')
+seurat$cell <- seurat@active.ident
+seurat <- subset(seurat, cell %in% c('cDendritic_cell','pDendritic_cell'))
+
+seurat <- NormalizeData(seurat, normalization.method = 'LogNormalize', scale.factor = 1e4, verbose = T) # 标准化
+seurat <- FindVariableFeatures(seurat, selection.method = 'vst', nfeatures = 2000) # 筛选高变基因
+VariableFeaturePlot(seurat, cols = c('grey','red'))
+seurat <- ScaleData(seurat) # 数据归一化，这步骤有一步回归的分析，去除噪声
+seurat <- RunPCA(seurat, features = VariableFeatures(seurat)) # PCA线性降维分析
+ElbowPlot(seurat, ndims = 30) # 流石图协助选择PC维度 10
+seurat <- RunHarmony(seurat, 'orig.ident') # Harmony去批次
+seurat <- RunUMAP(seurat, dims = 1:10, reduction = 'harmony')
+seurat <- RunTSNE(seurat, dims = 1:10, reduction = 'harmony')
+seurat <- FindNeighbors(seurat, reduction = 'harmony', dims = 1:10)
+seurat <- FindClusters(seurat, resolution = c(seq(0, .9, .2)))
+
+plots <- map2(paste0('RNA_snn_res.', seq(0, .9, .2)), paste0('SNN: ', seq(0, .9, .2)), ~
+                DimPlot(seurat, reduction = 'tsne', group.by = .x, label = T) +
+                ggtitle(.y) + theme(aspect.ratio = 1) + guides(color = 'none'))
+plot_grid(plotlist = plots, nrow = 1)
+ggsave('tsne.SNN.dimplot.pdf', width = 20, height = 4)
+
+# 细胞基因标记
+markers <- list(
+  # CD8_T = c('CD3D','CD8A','CD8B','CD3E','CD3'), 
+  # CD4_T = c('CD3D','CD4','IL7R','LTB','CD3'), 
+  # gdT = c('TRDV2','TRGV9'),
+  # NK = c('NCAM1','KLRF1','FGFBP2','FCG3RA','CX3CR1','GNLY','NKG7','TYOBP','PRF1'), 
+  # B = c('CD19','CD79A','CD79B','MS4A1'), # CD20->MS4A1
+  # Plasmablast = c('XBP1','RF4','PRDM1','PAX5'), # 浆母细胞
+  # Plasma_cell = c('CD79A','IGHG1','MZB1','SDC1'), # 浆细胞
+  # Neutrophils = c('FCGR3B','MMP9','CST3','LYZ','CSF3R'),
+  CD14_monocyte = c('CD14','LYZ','CD33','FCN1'),
+  CD16_monocyte = c('CD14','FCGR3A','CD33','LYN'), # FCGR3A -> CD
+  # M1_Macrophage = c('CD80','CD86','INOS'), # 经典激活型巨噬细胞 classically activated macrophages
+  # M2_Macrophage = c('CD163','MRC1'), # 交替激活型巨噬细胞 alternatively activated macrophages
+  # Endothelial_cell = c('PTPRB','PECAM1'),
+  # Platelet = c('PPBP','ITGA2B'), # 血小板
+  # Epithelial_cell = c('EPCAM','CK13','CK5'), # 上皮细胞
+  # Erythroblast = c('MKI67','HBA1','HBB'), # 成红血细胞
+  # HSC = c('NRIP1','MECOM','PROM1','NKAIN2','CD34'), # Hematopoietic Stem Cell 造血干细胞
+  cDC1 = c('CLEC9A','CADM1','THBD','LY75','XCR1','ITGAX'), # 传统树突状细胞1
+  cDC2 = c('ITGAX','BTLA','FCER1A','CD1C','ITGAM','SIRPA','CD5'), # 传统树突状细胞2
+  pDC = c('ITGAX','IL3RA','CLEC4C','NRP1','PTPRC','CCR2','CXCR3','LILRA4'), # 浆细胞样树突状细胞
+  MoDC = c('ITGAX','CD1C','ITGAM','CD14','FCGR1A','MRC1','SIRPA','CD1A','CCR2'),
+  DC3 = c('FCER1A','CD1C','CD163','CD14')
+)
+
+# featureplot
+markers <- map(markers, \(x) x[x %in% rownames(seurat)])
+max_len <- map_vec(markers, ~ length(.x)) %>% max()
+plots <- map2(markers, names(markers), \(x, y) {
+  p_text <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold',
+                        label = stringr::str_to_title(gsub('_', ' ', y))) + 
+                   theme_void())
+  p_feats <- map(x, ~ FeaturePlot(seurat, reduction = 'tsne', features = .x) +
+                   theme(aspect.ratio = 1))
+  p_void <- list(ggtext(data.frame(x = 1, y = 1), 'x', 'y', size = 14, face = 'bold') + 
+                   theme_void())
+  cowplot::plot_grid(plotlist = c(p_text, p_feats, rep(p_void, times = max_len - length(x))),
+                     nrow = 1) } )
+cowplot::plot_grid(plotlist = plots, align = 'v', ncol = 1)
+ggsave('tsne.featureplot.pdf', width = 4.5 * (max_len + 1), 
+       height = 4.5 * length(markers), limitsize = F)
+
+seurat <- SetIdent(seurat, value = 'RNA_snn_res.0.2')
+DimPlot(seurat, reduction = 'tsne', label = T, alpha = 1, raster = F) + 
+  NoLegend() + theme(aspect.ratio = 1)
+ggsave('tsne.SNN.0.2.dimplot.pdf', width = 6, height = 6)
+
+# 鉴定每个cluster中的marker
+allmarkers <- FindAllMarkers(seurat, only.pos = T, min.pct = 0.25, logfc.threshold = 0.25)
+write.xlsx(allmarkers, 'allmarkers.cluster.xlsx')
+
+#### 细胞注释 ####
+plot_data <- FetchData(seurat, vars = c('CLEC9A','CADM1','THBD','LY75','XCR1','BTLA','FCER1A', 'CD5',
+                                        'IL3RA','CLEC4C','NRP1','PTPRC','CXCR3','LILRA4','ITGAX',
+                                        'CD1C','ITGAM','CD14','FCGR1A','MRC1','SIRPA','CD1A','CCR2')) %>% 
+  add_column(cell = seurat@active.ident) %>% 
+  gather(key = 'gene', value = 'value', -cell)
+
+ggplot(plot_data, aes(cell, value), color = factor(cell)) +
+  geom_violin(aes(fill = cell), scale ='width') +
+  facet_grid(gene ~ ., scales = 'free_y') +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_fill_manual(values = pald('rainbow3')[c(1,4,7,11)]) +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        axis.title = element_blank(),
+        axis.ticks.length = unit(1.6, 'mm'),
+        axis.ticks.y = element_blank(),
+        axis.text = element_text(color = 'black', size = 10),
+        axis.text.y = element_blank(),
+        legend.position = 'none',
+        panel.spacing.y = unit(0, 'cm'),
+        strip.text.y = element_text(angle = 0, size = 12, hjust = 0, face = 'italic'),
+        strip.background.y = element_blank())
+ggsave('violinplot.cluster.DCs.pdf', width = 4, height = 10)
+
+seurat <- RenameIdents(seurat, '0' = 'cDC2', '1' = 'cDC1', '2' = 'pDC', '3' = 'cDC1')
+
+# 可视化
+DimPlot(seurat, reduction = 'tsne', label = T, alpha = 1, cols = 'Set3', raster = F) + 
+  theme(aspect.ratio = 1) + NoLegend()
+ggsave('tsne.marker.dimplot.pdf', width = 6, height = 6)
+
+DimPlot(seurat, reduction = 'tsne', label = T, alpha = 1, split.by = 'group', raster = F,
+        cols = 'Set3', label.size = 3) + theme(aspect.ratio = 1)
+ggsave('tsne.marker.dimplot.facet_by_group.pdf', width = 20, height = 5)
+
+# 差异基因
+allmarkers <- FindAllMarkers(seurat, only.pos = T, min.pct = 0.25, logfc.threshold = 0.25)
+write.xlsx(allmarkers, 'allmarkers.cell.xlsx')
+
+# 保存seurat对象
+saveRDS(seurat, 'seurat.out.rds')
+
+#### IDO/AHR ####
+source('/data/mengjx/R_proj/R_func/calcu_diff.R')
+diffs <- readRDS('diffs.rds')
+
+data <- map_df(names(diffs), \(x) {
+    filter(diffs[[x]], name %in% c('IDO1', 'AHR')) %>%
+    add_column(comparison = x)
+  } )
+write.xlsx(data, 'diffs.IDO1_AHR.xlsx')
+
+plot_data <- dplyr::select(data, name, log2FC = avg_log2FC, padj = p_val_adj, comparison) %>% 
+  mutate(cell = str_split_i(comparison, '_', 1),
+         comparison = str_split_i(comparison, '_', 2)) %>% 
+  add_plab('padj', format = 2) %>% 
+  mutate(label = paste0(ifelse(log2FC > 0, '+', '-'), '\n', plab)) %>% 
+  select(-padj, -plab) %>% 
+  spread('comparison', 'log2FC', fill = 0) %>% 
+  gather('comparison', 'log2FC', -label, -cell, -name)
+
+ggplot(plot_data, aes(comparison, cell)) +
+  geom_tile(aes(fill = log2FC, width = 1, height = 1), color = '#ffffff', linewidth = 1) +
+  geom_text(aes(label = label, lineheight = .8)) +
+  facet_grid(cols = vars(name)) +
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0)) +
+  scale_fill_gradient2(low = '#619CFF', mid = '#ffffff', high = '#F8766D') +
+  labs(x = '', y = '', title = 'ParkA_2021') +
+  coord_fixed() +
+  theme_linedraw() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        axis.text = element_text(color = '#000000', size = 12),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank())
+ggsave('diffs.IDO1_AHR.pdf', width = 6, height = 3.5)
+
+
+seurat <- readRDS('seurat.out.rds')
+allmarkers <- read.xlsx('allmarkers.cell.xlsx')
+
+top3_markers <- allmarkers %>%
+  group_by(cluster) %>%
+  slice_max(n = 3, order_by = avg_log2FC)
+
+DotPlot(seurat, features = unique(top3_markers$gene)) + NoLegend() # 标志基因表达DotPlot
+DoHeatmap(seurat, features = unique(top3_markers$gene)) + NoLegend() # 标志基因表达Heatmap
+VlnPlot(seurat, features = unique(top3_markers$gene)) + NoLegend() # 标志基因表达VlnPlot
+
+plot_data <- FetchData(seurat, vars = top5_markers$gene) %>% 
+  add_column(cell = seurat@active.ident) %>% 
+  gather(key = 'gene', value = 'value', -cell)
+ggplot(plot_data, aes(cell, value), color = factor(cell)) +
+  geom_violin(aes(fill = cell), scale ='width', show.legend = F) +
+  facet_grid(gene ~ ., scales = 'free_y') +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_fill_brewer(palette = 'Set3') +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_text(color = 'black', size = 10),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.spacing.y = unit(0, 'cm'),
+        strip.text.y = element_text(angle = 0, size = 10, hjust = 0, face = 'italic'),
+        strip.background.y = element_blank())
+ggsave('violinplot.cluster.DCs.pdf', width = 4, height = 10)
+```

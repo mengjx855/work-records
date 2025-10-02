@@ -1,0 +1,194 @@
+---
+title: "Abundance correlation between Bile acids and bacteia ZhangYQ"
+author: "Jinxin Meng"
+date: "2025-04-12"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## correlation analysis 
+
+```{R}
+#### abundance & accociation ####
+# biles ab
+grp <- c('Mock','PDCoV')
+grp_col <- structure(c('#a0a0a4','#d7b0b0'), names = grp)
+
+.level <- c('CA','CDCA','HCA','DCA','LCA','UDCA','HDCA','GCA','TCA','GCDCA',
+            'TCDCA','GHCA','THCA','THDCA','GUDCA','TUDCA','GDCA','TDCA',
+            'GLCA','TLCA')
+
+profile <- read.delim('../data/BA_data_custom.txt', sep = "\t", row.names = 1)
+
+group <- data.frame(sample = colnames(profile)) %>% 
+  mutate(group = gsub('\\d+', '', sample))
+
+data <- profile %>% 
+  rownames_to_column('name') %>% 
+  gather('sample', 'value', -name) %>% 
+  left_join(group, by = 'sample') %>% 
+  mutate(.value = log10(value),
+         name = factor(name, .level))
+
+data %>% 
+  group_by(name) %>% 
+  rstatix::wilcox_test(value ~ group) %>% 
+  rstatix::add_significance('p')
+
+data %>% 
+  group_by(name) %>% 
+  rstatix::anova_test(.value ~ group) %>% 
+  rstatix::add_significance('p')
+
+ggboxplot(data, 'name', '.value', fill = 'group', palette = grp_col, width = .6,
+          outlier.shape = NA, xlab = '', ylab = 'log10 content', legend = 'none',
+          x.text.angle = 45) +
+  annotate('text', x = c(1, 4, 5, 8, 19), y = c(3, 2.5, 2.8, 2, 1), 
+           label = c('**', '**', '*', '**', '*'), color = 'red') +
+  annotate('segment', x = .75, xend = 1.25, y = 2.9) +
+  annotate('segment', x = 3.75, xend = 4.25, y = 2.4) +
+  annotate('segment', x = 4.75, xend = 5.25, y = 2.7) +
+  annotate('segment', x = 7.75, xend = 8.25, y = 1.9) +
+  annotate('segment', x = 18.75, xend = 19.25, y = 0.9)
+ggsave('biles_ab.pdf', width = 6, height = 3)
+
+# heatmap 20250412
+grp <- c('Mock','PDCoV')
+grp_col <- structure(c('#a0a0a4','#d7b0b0'), names = grp)
+
+col_data <- data.frame(name = colnames(profile)) %>% 
+  left_join(group, by = c('name' = 'sample'))
+
+col_split <- factor(col_data$group)
+
+pdf('biles_ab.heatmap.pdf', width = 7, height = 7)
+pheatmap(log10(profile), scale = 'row',
+         cellwidth = 10,cellheight = 10,
+         colorRampPalette(c("#3288bd", "#ffffff", "#d53e4f"))(100),
+         # color = paletteer::paletteer_c("grDevices::Temps", 30),
+         fontsize_col = 8, fontsize_row = 8,
+         treeheight_col = 0, treeheight_row = 0,
+         border = "#ffffff", border_gp = gpar(col = "#000000"),
+         column_split = col_split,
+         column_gap = unit(1, "mm"))
+dev.off()
+
+# radar
+f = function(x) { (x - min(x)) / (max(x) - min(x))}
+f(plot_data[1, 2:21])
+
+plot_data <- profile_smp2grp(profile, group) %>% 
+  apply(2, \(x) log10(x + 1)) %>% 
+  data.frame() %>% 
+  t %>% 
+  data.frame() %>% 
+  rownames_to_column('group') %>% 
+  as_tibble()
+
+ggradar(plot_data, group.colours = c('#a0a0a4','#d7b0b0'))
+ggsave('biles_ab.radar.pdf', width = 8, height = 7)
+
+# association 
+data <- read.delim('clipboard', sep = "\t")
+
+.biles <- c("CA","CDCA","HCA","DCA","LCA","HDCA","UDCA")
+
+map(.biles, \(x) 
+    ggscatter(data, "virus", y = x, color = "grey", add = "reg.line", 
+              ylab = x, xlab = "fecal viral loads", cor.coef = T, 
+              cor.method = "spearman", size = 2) +
+      geom_smooth(method = 'lm', color = "grey", alpha = .1, level = 0.75,
+                  linewidth = 1) +
+      stat_poly_eq(aes(label = paste(after_stat(eq.label), 
+                                     after_stat(adj.rr.label), 
+                                     after_stat(p.value.label), sep = '~~~~')), 
+                   formula = y ~ x, label.y = .85) +
+      theme(aspect.ratio = 1) ) %>% 
+  cowplot::plot_grid(plotlist = ., nrow = 2, align = 'v')
+  
+ggsave("biles_corr.pdf", width = 12, height = 6)
+
+# 靶向代謝組基於師姐給的數據
+MBT_profile <- read.delim('../data/BA_data_custom.txt', sep = "\t", row.names = 1)
+
+group <- data.frame(sample = colnames(profile)) %>% 
+  mutate(group = gsub('\\d+', '', sample))
+
+coef_data <- read.delim('../../MGX_WGS_PDCoV_Sus_feces/analysis/taxa.masslin2.species/all_results.tsv') %>% 
+  mutate(feature = gsub('\\.', ' ', feature),
+         feature = gsub('CAG ', 'CAG-', feature)) %>% 
+  filter(pval < 0.05) %>% 
+  mutate(enriched = ifelse(coef > 0, 'PDCoV', 'Mock')) %>% 
+  select(feature, coef, enriched) %>%
+  mutate(coef = abs(coef),
+         feature = sub('CAG ', 'CAG-', feature)) %>% 
+  arrange(coef) %>% 
+  group_by(enriched) %>% 
+  slice_tail(n = 10) %>% 
+  ungroup() %>% 
+  arrange(desc(enriched))
+
+MGX_sample <- c("Mock_D3_5745","Mock_D3_5744","Mock_D1_5744",
+                "PDCoV_D1_5743","PDCoV_D0_5755","PDCoV_D0_5743",
+                "PDCoV_D1_5742","PDCoV_D3_5751","PDCoV_D3_5753",
+                "PDCoV_D3_5742","PDCoV_D1_5751","PDCoV_D3_5756")
+
+MGX_group <- read.delim('../data/MGX_group.tsv') %>% 
+  filter(sample %in% MGX_sample) %>% 
+  arrange(match(sample, MGX_sample))
+MGX_profile <- read.delim('../data/MGX_species.tsv', row.names = 1) %>% 
+  select(all_of(MGX_group$sample)) %>% 
+  filter(rownames(.) %in% coef_data$feature)
+
+corr <- psych::corr.test(t(MGX_profile), t(MBT_profile), method = "spearman")
+r_data <- data.frame(t(corr$r), check.names = F)
+p_data <- data.frame(t(corr$p), check.names = F)
+
+# p_data <- data.frame(t(corr$p), check.names = F) %>% 
+#   rownames_to_column('name') %>% 
+#   gather('taxa', 'pval', -name) %>% 
+#   mutate(padj = p.adjust(pval, method = 'BH')) %>% 
+#   select(-pval) %>% 
+#   spread('taxa', 'padj') %>% 
+#   column_to_rownames('name')
+
+rownames_to_column(r_data, "name") %>% write.xlsx('r_data.xlsx')
+rownames_to_column(p_data, "name") %>% write.xlsx('p_data.xlsx')
+
+plot_label <- apply(p_data, 2, \(x) ifelse(x < 0.01, "**", ifelse(x < 0.05, "*", "")))
+
+pdf("cor_spearman.pdf", height = 6, width = 6)
+pheatmap(t(r_data),
+         cluster_rows = T, cluster_cols = T,
+         border = "#ffffff", border_gp = gpar(col = "#000000"),
+         show_rownames = T, show_colnames = T,
+         cellwidth = 10,cellheight = 10,
+         treeheight_col = 0, treeheight_row = 0,
+         fontsize_col = 8, fontsize_row = 8,
+         display_numbers = t(plot_label),
+         fontface_row = "italic", angle_col = "45")
+dev.off()
+
+plot_label <- apply(p_data, 2, \(x) ifelse(x < 0.01, "**", ifelse(x < 0.05, "*", "")))
+plot_label <- plot_label[(apply(plot_label, 1, \(x) sum(x!='')) != 0),]
+r_data <- r_data[rownames(plot_label),]
+
+
+pdf("cor_spearman.v2.pdf", height = 6, width = 6)
+pheatmap((r_data),
+         cluster_rows = T, cluster_cols = T,
+         border = "#ffffff", border_gp = gpar(col = "#000000"),
+         show_rownames = T, show_colnames = T,
+         cellwidth = 10,cellheight = 10,
+         treeheight_col = 0, treeheight_row = 0,
+         fontsize_col = 8, fontsize_row = 8,
+         display_numbers = (plot_label),
+         fontface_col = "italic")
+dev.off()
+```

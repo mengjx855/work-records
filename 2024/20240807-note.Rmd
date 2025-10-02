@@ -1,0 +1,73 @@
+---
+title: "BC SUP HM350 metabolomics"
+author: "Jinxin Meng"
+date: "2024-08-07"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## LC-MS TIC plot
+
+```{R}
+library(xcms) %>% suppressMessages()
+library(MsExperiment) %>% suppressMessages()
+
+rt = 7.16
+
+# BC group
+BC_ms <- readSRMData("../rawdata/BC.mzML")
+BC_ms_parser <- parse_MChromatograms(BC_ms)
+
+BC_ms_data <- BC_ms_parser %>% 
+  filter(rt_min < rt & rt_max > rt)
+
+# BC control group
+Con_ms <- readSRMData("../rawdata/BC_control.mzML")
+Con_ms_parser <- parse_MChromatograms(Con_ms)
+Con_ms_data <- Con_ms_parser %>% 
+  filter(rt_min < rt & rt_max > rt)
+
+plot_list <- map(Con_ms_data$name, \(x) {
+  plot_data <- rbind(data.frame(rtime = rtime(BC_ms[x]), 
+                                intensity = intensity(BC_ms[x])) %>% 
+                       add_column(class = "BC"),
+                     data.frame(rtime = rtime(Con_ms[x]), 
+                                intensity = intensity(Con_ms[x])) %>% 
+                       add_column(class = "Con")) %>% 
+    mutate(rtime = as.numeric(rtime))
+  
+  ggplot(plot_data, aes(rtime, intensity, group = class)) +
+    geom_line(aes(color = class), show.legend = F) +
+    geom_vline(xintercept = 7.16, linetype = "dashed") +
+    scale_color_manual(values = c("BC" = "#f8766d", "Con" = "#00bfc4")) +
+    labs(title = paste0("ms: ", x)) +
+    theme_pubr() +
+    theme(aspect.ratio = .7) } )
+cowplot::plot_grid(plotlist = plot_list, align = "v", nrow = 6)
+ggsave("ms_plot.pdf", width = 30, height = 24)
+
+# MS 388
+plot_data <- rbind(data.frame(rtime = rtime(BC_ms["388"]), 
+                              intensity = intensity(BC_ms["388"])) %>% 
+                     add_column(class = "BC"),
+                   data.frame(rtime = rtime(Con_ms["388"]), 
+                              intensity = intensity(Con_ms["388"])) %>% 
+                     add_column(class = "Con")) %>% 
+  mutate(rtime = as.numeric(rtime))
+
+options(scipen = 10)
+
+ggplot(plot_data, aes(rtime, intensity, group = class)) +
+  ggalt::geom_xspline(aes(color = class), size = 3, spline_shape = 1) +
+  scale_color_manual(values = c("BC" = "#f8766d", "Con" = "#00bfc4")) +
+  labs(x = 'Retention time (min)', y = 'Intensity') +
+  theme_pubr() +
+  theme(aspect.ratio = .9) +
+  guides(color = guide_legend(position = "right"))
+```

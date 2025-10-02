@@ -1,0 +1,81 @@
+---
+title: "P. russellii, B. coccoides, and  C. sporogenes metagenomic co-abundance in public datasets"
+author: "Jinxin Meng"
+date: "2024-10-08"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## Pru, Bco, Csp metagenomic co-abundance in public datasets
+```{R}
+data <- read.delim('minimap2.rc.tsv') %>% 
+  filter(reads_count > 5000000) %>% 
+  mutate(Bco_rela_ab = Bcoccoides / reads_count * 100,
+         Csp_rela_ab = Csporogenes / reads_count * 100,
+         Pru_rela_ab = Prussellii / reads_count * 100) %>% 
+  dplyr::select(name, ends_with('rela_ab')) %>% 
+  left_join(read.delim('project.tsv'), by = c('name' = 'sample')) %>% 
+  filter(!name %in% c('SRR27217299','ERR1620278','ERR1620262','SRR27029799','SRR27029565',
+                      'SRR27029396','SRR5650177','SRR5650125','SRR6468521','SRR6468501',
+                      'SRR6468624','SRR6504857','SRR6468572','SRR10029190','SRR27029841',
+                      'SRR6468596')) %>% 
+  filter(project_ID %in% c('HallAB_2017.PRJNA385949','LloydPriceJ_2019.PRJNA398089',
+                           'SchirmerM_2018.PRJNA389280','WengY_2019.PRJNA429990',
+                           'YanQ_2023c.PRJEB67456'))
+
+project <- split(data$name, data$project_ID)
+
+plots <- map2(project, names(project), ~ {
+  .data <- filter(data, name %in% .x)
+  ggscatter(.data, 'Pru_rela_ab', 'Bco_rela_ab', cor.coef = T, cor.method = 'spearman', 
+            color = '#66c2a5', shape = 16, xlab = 'Relative abundance of P. russellii (%)', 
+            ylab = 'Relative abundance of B. coccoides (%)', title = .y,
+            add = 'reg.line') +
+    # ggpmisc::stat_poly_eq(aes(label = paste(after_stat(adj.rr.label),
+    #                                         after_stat(p.value.label), sep = '~~~~')),
+    #                       formula = y ~ x, label.y = .87) +
+    theme(aspect.ratio = 1,
+          plot.title = element_text(face = 'bold', hjust = .5),
+          axis.ticks.length = unit(2, 'mm')) })
+cowplot::plot_grid(plotlist = plots, align = 'v', nrow = 1)
+ggsave('scatterplot.Pru-Bco.pdf', width = 20, height = 4)
+ggsave('scatterplot.Pru-Bco.jpg', width = 20, height = 4)
+
+plots <- map2(project, names(project), ~ {
+  .data <- filter(data, name %in% .x)
+  ggscatter(.data, 'Pru_rela_ab', 'Csp_rela_ab', cor.coef = T, cor.method = 'spearman', 
+            color = '#66c2a5', shape = 16, xlab = 'Relative abundance of P. russellii (%)', 
+            ylab = 'Relative abundance of C. sporogenes (%)', title = .y,
+            add = 'reg.line') +
+    # ggpmisc::stat_poly_eq(aes(label = paste(after_stat(adj.rr.label), 
+    #                                         after_stat(p.value.label), sep = '~~~~')), 
+    #                       formula = y ~ x, label.y = .85) +
+    theme(aspect.ratio = 1,
+          plot.title = element_text(face = 'bold', hjust = .5),
+          axis.ticks.length = unit(2, 'mm')) })
+cowplot::plot_grid(plotlist = plots, align = 'v', nrow = 1)
+ggsave('scatterplot.Pru-Csp.pdf', width = 20, height = 4)
+ggsave('scatterplot.Pru-Csp.jpg', width = 20, height = 4)
+
+plots <- map2(project, names(project), ~ {
+  .data <- filter(data, name %in% .x)
+  ggscatter(.data, 'Bco_rela_ab', 'Csp_rela_ab', cor.coef = T, cor.method = 'spearman', 
+            color = '#66c2a5', shape = 16, xlab = 'Relative abundance of B. coccoides (%)', 
+            ylab = 'Relative abundance of C. sporogenes (%)', title = .y,
+            add = 'reg.line') +
+    # ggpmisc::stat_poly_eq(aes(label = paste(after_stat(adj.rr.label), 
+    #                                         after_stat(p.value.label), sep = '~~~~')), 
+    #                       formula = y ~ x, label.y = .85) +
+    theme(aspect.ratio = 1,
+          plot.title = element_text(face = 'bold', hjust = .5),
+          axis.ticks.length = unit(2, 'mm')) })
+cowplot::plot_grid(plotlist = plots, align = 'v', nrow = 1)
+ggsave('scatterplot.Bco-Csp.pdf', width = 20, height = 4)
+ggsave('scatterplot.Bco-Csp.jpg', width = 20, height = 4)
+```

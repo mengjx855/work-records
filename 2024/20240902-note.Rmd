@@ -1,0 +1,73 @@
+---
+title: "BC SUP Trytophan-target metabolomics"
+author: "Jinxin Meng"
+date: "2024-09-02"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## PCA, difference and visualization
+
+```{R}
+#### data ####
+profile <- read.xlsx('data/data.xlsx', sheet = 'profile', rowNames = T)
+group <- read.xlsx('data/data.xlsx', sheet = 'group')
+
+group_level <- c('BC', 'CMC')
+group_color <- c('BC' = '#EFD496', 'CMC' = '#9BB89C')
+
+#### PCA ####
+source('/code/R_func/plot_PCA.R')
+plot_PCA(log10(profile), group, add_group = T, group_color = group_color,
+         lab_size = 4, aspect_ratio = 4/5)
+ggsave('PCA.pdf', width = 5, height = 4)
+
+#### difference ####
+library(ropls)
+source('/code/R_func/calcu_difference.R')
+
+plsda <- opls(t(log10(profile)), y = pull(group, group), crossvalI = 6, predI = 1)
+difference <- difference_analysis(profile, group, comparison = group_level, method = 't')
+
+result <- data.frame(vip = plsda@vipVn) %>% 
+  rownames_to_column('name') %>% 
+  left_join(difference, ., by = 'name') %>% 
+  mutate(enriched = ifelse(vip > 1 & padj < 0.05 & log2FC > 0, 'BC', 
+                           ifelse(vip > 1 & padj < 0.05 & log2FC < 0, 'CMC', 'none')))
+
+openxlsx::write.xlsx(result, 'difference.xlsx')
+
+#### enriched in BC indole ####
+difference <- read.xlsx('difference.xlsx') %>% 
+  filter(grepl('^Indole', name)) %>% 
+  arrange(desc(log2FC)) %>% 
+  mutate(label = paste0('Fold=', round(FC, 3), ', P-adj=', round(padj, 3)))
+
+plot_data <- data.frame(t(profile[difference$name,]), check.names = F) %>% 
+  rownames_to_column('sample') %>% 
+  gather('name', 'value', -sample) %>% 
+  left_join(group, by = 'sample') %>% 
+  mutate(name = factor(name, difference$name))
+
+map(difference$name, ~ filter(plot_data, name == .x) %>% 
+      ggplot(aes(x = value, y = name, fill = group)) +
+      geom_density_ridges(rel_min_height = 0.001, scale = 100, alpha = .8) +
+      labs(x = 'Metabolite Content (nmol/mg)', y = '', fill = '',
+           title = 'Indole-related metabolites') +
+      xlim(0, NA) +
+      scale_fill_manual(values = group_color) +
+      scale_y_discrete(expand = c(.01, 0), 
+                       labels = paste0(.x, '\n', difference[difference$name == .x, 'label'])) +
+      theme_pubr() +
+      theme(aspect.ratio = 1/7,
+            axis.ticks.length = unit(2, 'mm'),
+            legend.position = 'right') ) %>% 
+  cowplot::plot_grid(plotlist = ., ncol = 1, align = 'v')
+ggsave('Indole_ggridge.pdf', width = 7, height = 7)
+```

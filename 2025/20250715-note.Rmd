@@ -1,0 +1,837 @@
+---
+title: "Colonization factor landscape in 10 IBD cohorts"
+author: "Jinxin Meng"
+date: "2025-07-15"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## pipeline
+
+```{bash}
+# https://tavazoielab.c2b2.columbia.edu/GHA/
+diamond makedb --in top02prc_withCF.faa -d top02prc_withCF
+diamond blastp -d top02prc_withCF.dmnd -q /data/database/uhgg/protein_catalogue/uhgp-90.faa -o uhgp-90.m8 -f 6 -p 100 --evalue 1e-5 --max-target-seqs 5 --sensitive --query-cover 60
+seqkit fx2tab -n -i -l top02prc_withCF.faa > top02prc_withCF.len
+perl -e '%h; open I, "top02prc_withCF.len"; while(<I>){chomp; @s=split/\t/; $h{$s[0]}=$s[1]} while(<>){chomp; @s=split/\t/; if($s[0] ne $a){$scov=$s[3]/$h{$s[1]}*100; $scov=100 if $scov>100; printf("$_\t%.2f\n", $scov) if($scov>90 & $s[2]>90); $a=$s[0]}}' uhgp-90.m8 > uhgp-90.m8.f
+cut -f1 uhgp-90.m8.f | seqkit grep -f - /data/database/uhgg/protein_catalogue/uhgp-90.ffn -o uhgp-90.fa
+cat uhgp-90.m8.f | perl -e 'open I, "/data/database/uhgg/genomes-all_metadata.tsv"; %h; while(<I>){chomp;@s=split/\t/;$h{$s[0]}=$_}; while(<>){chomp;@s=split/\t/;$s[0]=~/(\S+?)_/;$x=$1; if(exists $h{$x}){print "$s[0]\t$s[1]\t$s[2]\t$s[12]\t$h{$x}\n"}else{$n=$x.".1";print "$s[0]\t$s[1]\t$s[2]\t$s[12]\t$h{$n}\n"}}' > uhgp-90.m8.genome_info.tsv
+
+# map
+bowtie2-build uhgp-90.fa uhgp-90
+cat BushmanFD_2020.clean_fq.filelist | sed 's/,/\t/' | parallel -j 8 --colsep="\t" bowtie2 --end-to-end --very-sensitive --no-unal --no-discordant -p 24 -x uhgp-90 -1 {2} -2 {3} 2\>BushmanFD_2020/{1}.log \| samtools view -bS \| samtools sort -o BushmanFD_2020/{1}.sort.bam -
+cut -f1 BushmanFD_2020.clean_fq.filelist | parallel -j 8 samtools coverage -d 0 BushmanFD_2020/{}.sort.bam -o BushmanFD_2020/{}.cvg
+combine_file_zy_folder_allsample.py -D BushmanFD_2020 -suffix .cvg -t 1 -n 1 -v 6 -o BushmanFD_2020.cvg
+combine_file_zy_folder_allsample.py -D BushmanFD_2020 -suffix .cvg -t 1 -n 1 -v 4 -o BushmanFD_2020.rc
+grep overall BushmanFD_2020/*log | perl -ne '/\/(\S+?).log:(\S+%)/;print "$1\t$2\n"' > BushmanFD_2020.map_rate
+
+# uhgg
+cat BushmanFD_2020.clean_fq.filelist | parallel -j 2 --colsep="\t" run_kraken2.sh {2} /data/database/uhgg/kraken2_db_uhgg_v2.0.2 BushmanFD_2020.kk2/{1} 100
+cat FranzosaEA_2018.clean_fq.filelist | parallel -j 2 --colsep="\t" run_kraken2.sh {2} /data/database/uhgg/kraken2_db_uhgg_v2.0.2 FranzosaEA_2018.kk2/{1} 100
+cat HallAB_2017.clean_fq.filelist | parallel -j 2 --colsep="\t" run_kraken2.sh {2} /data/database/uhgg/kraken2_db_uhgg_v2.0.2 HallAB_2017.kk2/{1} 100
+cat HeQ_2017.clean_fq.filelist | parallel -j 2 --colsep="\t" run_kraken2.sh {2} /data/database/uhgg/kraken2_db_uhgg_v2.0.2 HeQ_2017.kk2/{1} 100
+cat KumbhariA_2024.clean_fq.filelist | parallel -j 2 --colsep="\t" run_kraken2.sh {2} /data/database/uhgg/kraken2_db_uhgg_v2.0.2 KumbhariA_2024.kk2/{1} 100
+cat LloydPriceJ_2019.clean_fq.filelist | parallel -j 2 --colsep="\t" run_kraken2.sh {2} /data/database/uhgg/kraken2_db_uhgg_v2.0.2 LloydPriceJ_2019.kk2/{1} 100
+cat SchirmerM_2018.clean_fq.filelist | parallel -j 2 --colsep="\t" run_kraken2.sh {2} /data/database/uhgg/kraken2_db_uhgg_v2.0.2 SchirmerM_2018.kk2/{1} 100
+cat SchirmerM_2024.clean_fq.filelist | parallel -j 2 --colsep="\t" run_kraken2.sh {2} /data/database/uhgg/kraken2_db_uhgg_v2.0.2 SchirmerM_2024.kk2/{1} 100
+cat WengY_2019.clean_fq.filelist | parallel -j 2 --colsep="\t" run_kraken2.sh {2} /data/database/uhgg/kraken2_db_uhgg_v2.0.2 WengY_2019.kk2/{1} 150
+cat YanQ_2023c.clean_fq.filelist | parallel -j 2 --colsep="\t" run_kraken2.sh {2} /data/database/uhgg/kraken2_db_uhgg_v2.0.2 YanQ_2023c.kk2/{1} 150
+
+combine_file_zy_folder_allsample.py -D BushmanFD_2020.kk2/ -suffix .bk_out.s -n 1 -v 7 -t 1 -s 0 -o BushmanFD_2020.kk2.s
+combine_file_zy_folder_allsample.py -D BushmanFD_2020.kk2/ -suffix .bk_out.p -n 1 -v 7 -t 1 -o BushmanFD_2020.kk2.p
+combine_file_zy_folder_allsample.py -D BushmanFD_2020.kk2/ -suffix .bk_out.f -n 1 -v 7 -t 1 -o BushmanFD_2020.kk2.f
+combine_file_zy_folder_allsample.py -D BushmanFD_2020.kk2/ -suffix .bk_out.g -n 1 -v 7 -t 1 -o BushmanFD_2020.kk2.g
+```
+
+## data preprocessing 20250801
+
+```{R}
+#### maping rate ####
+proj_names <- c('BushmanFD_2020','FranzosaEA_2018','HallAB_2017','HeQ_2017','KumbhariA_2024',
+                'LloydPriceJ_2019','SchirmerM_2018','SchirmerM_2024','WengY_2019','YanQ_2023c')
+  
+plots <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group)
+  data <- read.delim(paste0('../profile/', .x, '.map_rate'), header = F, col.names = c('sample', 'value')) %>% 
+    mutate(value = sub('%', '', value),
+           value = as.numeric(value))
+  group_level <- intersect(c('HC','IBD','CD','UC','IC'), unique(group$group))
+  plot_alpha(data, group, group_level = group_level, ylab = '% of mapping rate', 
+             show_grid = F, title = .x, group_color = pald('npg')) 
+  } )
+cowplot::plot_grid(plotlist = plots, nrow = 2, align = 'v')
+ggsave('mapping_rate.boxplot.pdf', width = 15, height = 6)
+
+#### profile ####
+gene_len <- read.delim('../data/uhgp-90.len', header = F, col.names = c('name', 'len'))
+gene_info <- read.delim('../data/uhgp-90.m8', header = F) %>%
+  dplyr::select(name = 1, value = 2) %>%
+  mutate(cFam = stringr::str_split_i(value, ',', 1),
+         cGene = stringr::str_split_i(value, ',', 2))
+
+# cRaw tpms
+tpms <- map(proj_names, ~ {
+  rc <- fread(paste0('../profile/', .x, '.rc')) %>% column_to_rownames('name')
+  cvg <- fread(paste0('../profile/', .x, '.cvg')) %>% column_to_rownames('name')
+  tpm <- rc2tpm(rc, gene_len) * (cvg > 50)
+  tpm[rowSums(tpm) != 0, colSums(tpm) != 0] } ) %>%
+  set_names(proj_names)
+saveRDS(tpms, 'cRaw.tpms.rds')
+
+# cRaw rcs
+rcs <- map(proj_names, ~ {
+  cvg <- fread(paste0('../profile/', .x, '.cvg')) %>% column_to_rownames('name')
+  rc <- fread(paste0('../profile/', .x, '.rc')) %>% column_to_rownames('name') * (cvg > 50)
+  rc[rowSums(rc) != 0, colSums(rc) != 0] } ) %>%
+  set_names(proj_names)
+saveRDS(rcs, 'cRaw.rcs.rds')
+
+# cGene tpms
+tpms <- map(proj_names, ~ {
+  rc <- fread(paste0('../profile/', .x, '.rc')) %>% column_to_rownames('name')
+  cvg <- fread(paste0('../profile/', .x, '.cvg')) %>% column_to_rownames('name')
+  tpm <- rc2tpm(rc, gene_len) * (cvg > 50)
+  tpm[colSums(tpm) != 0] %>%
+    mutate(name = gene_info$cGene[match(rownames(tpm), gene_info$name)]) %>%
+    aggregate(. ~ name, ., sum) %>%
+    column_to_rownames('name') %>%
+    filter(rowSums(.) != 0) } ) %>%
+  set_names(proj_names)
+saveRDS(tpms, 'cGene.tpms.rds')
+
+# cGene rcs
+rcs <- map(proj_names, ~ {
+  cvg <- fread(paste0('../profile/', .x, '.cvg')) %>% column_to_rownames('name')
+  rc <- fread(paste0('../profile/', .x, '.rc')) %>% column_to_rownames('name') * (cvg > 50)
+  mutate(rc, name = gene_info$cGene[match(rownames(rc), gene_info$name)]) %>%
+    aggregate(. ~ name, ., sum) %>%
+    column_to_rownames('name') %>%
+    filter(rowSums(.) != 0) } ) %>%
+  set_names(proj_names)
+saveRDS(rcs, 'cGene.rcs.rds')
+
+# cFam tpms
+tpms <- map(proj_names, ~ {
+  rc <- fread(paste0('../profile/', .x, '.rc')) %>% column_to_rownames('name')
+  tpm <- rc2tpm(rc, gene_len)
+  tpm[colSums(tpm) != 0] %>%
+    mutate(name = gene_info$cFam[match(rownames(tpm), gene_info$name)]) %>%
+    aggregate(. ~ name, ., sum) %>%
+    column_to_rownames('name') %>%
+    filter(rowSums(.) != 0) } ) %>%
+  set_names(proj_names)
+saveRDS(tpms, 'cFam.tpms.rds')
+
+# cFam rcs
+rcs <- map(proj_names, ~ {
+  rc <- fread(paste0('../profile/', .x, '.rc')) %>% column_to_rownames('name')
+  mutate(rc, name = gene_info$cFam[match(rownames(rc), gene_info$name)]) %>%
+    aggregate(. ~ name, ., sum) %>%
+    column_to_rownames('name') %>%
+    filter(rowSums(.) != 0) } ) %>%
+  set_names(proj_names)
+saveRDS(rcs, 'cFam.rcs.rds')
+
+#### contributor ####
+proj_names <- c('BushmanFD_2020','FranzosaEA_2018','HallAB_2017','HeQ_2017','KumbhariA_2024',
+                'LloydPriceJ_2019','SchirmerM_2018','SchirmerM_2024','WengY_2019','YanQ_2023c')
+
+gene_len <- read.delim('../data/uhgp-90.len', header = F, col.names = c('name', 'len'))
+gene_info <- read.delim('../data/uhgp-90.m8', header = F) %>%
+  dplyr::select(name = 1, value = 2) %>%
+  mutate(cFam = stringr::str_split_i(value, ',', 1),
+         cGene = stringr::str_split_i(value, ',', 2))
+taxonomy <- read.delim('../pipeline/uhgp-90.m8.genome_info.tsv', header = F) %>% 
+  dplyr::select(name = V1, taxonomy = V19) %>% 
+  taxa_split()
+
+data <- map(proj_names, ~ {
+  rc <- fread(paste0('../profile/', .x, '.rc')) %>% column_to_rownames('name')
+  cvg <- fread(paste0('../profile/', .x, '.cvg')) %>% column_to_rownames('name')
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group)
+  tpm <- profile_smp2grp(rc2tpm(rc, gene_len) * (cvg > 50), group) %>% 
+    profile_transRA() %>% 
+    filter(rowSums(.) != 0) %>% 
+    mutate(cFam = gene_info$cFam[match(rownames(.), gene_info$name)]) %>%
+    mutate(taxa = taxonomy$genus[match(rownames(.), taxonomy$name)]) %>%
+    aggregate(. ~ cFam + taxa, ., sum) %>% 
+    gather('group', 'value', -cFam, -taxa)
+  
+  } ) %>%
+  set_names(proj_names)
+saveRDS(tpms, 'cRaw.tpms.rds')
+```
+
+## cFam diversity 20250801
+
+```{R}
+#### cFam diversity ####
+proj_names <- c('BushmanFD_2020','FranzosaEA_2018','HallAB_2017','HeQ_2017','KumbhariA_2024',
+                'LloydPriceJ_2019','SchirmerM_2018','SchirmerM_2024','WengY_2019','YanQ_2023c')
+
+tpms <- readRDS('cFam.tpms.rds')
+
+# shannon
+plots <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group)
+  group_level <- intersect(c('HC','IBD','CD','UC','IC'), unique(group$group))
+  calcu_alpha(tpms[[.x]], method = 'shannon') %>% 
+    plot_alpha(group, title = .x, ylab = 'Shannon Index',show_grid = F,
+               group_level = group_level, group_color = pald('npg') ) })
+cowplot::plot_grid(plotlist = plots, nrow = 2, align = 'v')
+ggsave('cFam.shannon.boxplot.pdf', width = 15, height = 6)
+
+# richness
+plots <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group)
+  group_level <- intersect(c('HC','IBD','CD','UC','IC'), unique(group$group))
+  calcu_alpha(tpms[[.x]], method = 'richness') %>% 
+    plot_alpha(group, title = .x, ylab = 'Richness Index',show_grid = F,
+               group_level = group_level, group_color = pald('npg') ) })
+cowplot::plot_grid(plotlist = plots, nrow = 2, align = 'v')
+ggsave('cFam.richness.boxplot.pdf', width = 15, height = 6)
+
+# pcoa 
+plots <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group)
+  group_level <- intersect(c('HC','IBD','CD','UC','IC'), unique(group$group))
+  plot_PCoA(tpms[[.x]], group, display_type = 'point', add_group_label = T, 
+            dis_method = 'bray', title = .x, group_color = pald('npg')) })
+cowplot::plot_grid(plotlist = plots, nrow = 2, align = 'v')
+ggsave('cFam.pcoa.dotplot.pdf', width = 25, height = 9)
+
+# disper
+plots <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group)
+  group_level <- intersect(c('HC','IBD','CD','UC','IC'), unique(group$group))
+  disper <- calcu_betadisper(tpms[[.x]], group, group_level = group_level, 
+                             group_color = pald('npg'))
+  disper$plot + 
+    labs(title = .x, subtitle = paste0('Anova-P = ', signif(disper$anova$`Pr(>F)`[1], 3))) +
+    theme(aspect.ratio = 1,
+          axis.ticks.length = unit(2, 'mm'),
+          plot.title = element_text(hjust = .5, size = 12, face = 'bold')) })
+cowplot::plot_grid(plotlist = plots, nrow = 2, align = 'v')
+ggsave('cFam.disper.boxplot.pdf', width = 15, height = 6)
+
+#### cFam composition ####
+plots <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group)
+  group_level <- intersect(c('HC','IBD','CD','UC','IC'), unique(group$group))
+  plot_compos_manual(tpms[[.x]], group, display = 'group', group_level = group_level,
+                     aspect_ratio = 2, top_n = 12, title = .x, x_text_angle = 0) })
+cowplot::plot_grid(plotlist = plots, nrow = 2, align = 'v')
+ggsave('cFam.compos.barplot.pdf', width = 22, height = 10)
+
+#### cFam difference ####
+data <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group)
+  comparisons <- map(setdiff(unique(group$group), 'HC'), ~ c(.x, 'HC'))
+  map_dfr(comparisons, \(x) difference_analysis(tpms[[.x]], group, comparison = x, add_enriched = T)) }) %>% 
+  set_names(proj_names)
+write.xlsx(data, 'cFam.diffs.xlsx')
+
+data <- read_xlsx_multiple('cFam.diffs.xlsx')
+data <- map_dfr(proj_names, ~ data[[.x]] %>% add_column(dataset = .x)) %>%
+  add_plab(by = 'padj', format = 4) %>% 
+  filter(padj < 0.2) %>% 
+  mutate(log2FC = ifelse(log2FC > 5, 5, log2FC),
+         log2FC = ifelse(log2FC < -5, -5, log2FC),
+         dataset = paste0(dataset, '|', comparison))
+
+dist <- dplyr::select(data, name, dataset, value = log2FC) %>% 
+  spread('name', 'value', fill = 0) %>% 
+  column_to_rownames('dataset') %>% 
+  dist
+dataset_level <- labels(dist)[hclust(dist)$order]
+
+dist <- dplyr::select(data, name, dataset, value = log2FC) %>% 
+  spread('dataset', 'value', fill = 0) %>% 
+  column_to_rownames('name') %>% 
+  dist
+feature_level <- labels(dist)[hclust(dist)$order]
+
+mutate(data, 
+       dataset = factor(dataset, dataset_level),
+       name = factor(name, feature_level)) %>% 
+  ggplot() +
+  geom_tile(aes(name, dataset, fill = log2FC), color = '#000000', linewidth = .4) +
+  geom_text(aes(name, dataset, label = plab), color = 'red', size = 4) +
+  scale_fill_gradient2(low = '#5ab4ac', mid = '#ffffff', high = '#d8b365', midpoint = 0) +
+  coord_fixed() +
+  theme_void() +
+  theme(axis.text = element_text(color = '#000000', size = 11, hjust = 1),
+        axis.text.x = element_text(angle = 90, hjust = 1))
+ggsave('cFam.diffs.tile.pdf', width = 18, height = 5)
+
+#### cFam meta-analysis ####
+data <- map(proj_names, ~ {
+  data <- tpms[[.x]]
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group)
+  comparisons <- map(setdiff(unique(group$group), 'HC'), ~ c(.x, 'HC'))
+  
+  mean_data <- data.frame(t(data)) %>% 
+    mutate(group = group$group[match(rownames(.), group$sample)]) %>% 
+    group_by(group) %>% 
+    summarise_all(mean) %>% 
+    ungroup %>% 
+    column_to_rownames('group')
+  
+  sd_data <- data.frame(t(data)) %>%  
+    mutate(group = group$group[match(rownames(.), group$sample)]) %>% 
+    group_by(group) %>% 
+    summarise_all(sd) %>% 
+    ungroup %>% 
+    column_to_rownames('group')
+  
+  n_data <- data.frame(t(data)) %>% 
+    mutate(group = group$group[match(rownames(.), group$sample)]) %>%
+    count(group) %>% 
+    column_to_rownames('group')
+  
+  map(comparisons, \(x) 
+      data.frame(m1 = unlist(mean_data[x[1],]),
+                 sd1 = unlist(sd_data[x[1],]),
+                 n1 = n_data[x[1],]) %>% 
+        rownames_to_column('name') %>%
+        add_column(m2 = unlist(mean_data[x[2],]),
+                   sd2 = unlist(sd_data[x[2],]),
+                   n2 = n_data[x[2],])) %>% 
+    set_names(map_vec(comparisons, \(x) paste0(x, collapse = '_vs_')))  }) %>% 
+  set_names(proj_names)
+
+names <- map(data, \(x) map(x, \(y) pull(y, name))) %>% 
+  flatten() %>% 
+  reduce(~ intersect(.x, .y))
+
+meta_in <- map(names, \(x) 
+               map_dfr(proj_names, \(y)
+                       map2_dfr(data[[y]], names(data[[y]]), \(a, b)
+                                filter(a, name == x) %>%
+                                  add_column(name2 = paste0(y, '.', b)))) %>% 
+                 dplyr::select(-name) %>% 
+                 rename(name = name2) %>% 
+                 relocate(name)) %>% 
+  set_names(names)
+
+meta_out <- map_dfr(names, ~ calcu_metafor.1(meta_in[[.x]]) %>% 
+                      mutate(padj = p.adjust(pval, method = 'BH')) %>% 
+                      add_column(feature = .x, .before = 1))
+write.xlsx(meta_out, 'cFam.meta-analysis.xlsx')
+
+data <- read.xlsx('cFam.meta-analysis.xlsx') %>% 
+  dplyr::select(feature, estimate, ci_lb, ci_ub, padj) %>% 
+  distinct() %>% 
+  add_plab(by = 'padj') %>% 
+  arrange(estimate) %>% 
+  mutate(feature = factor(feature, .$feature),
+         ypos = ifelse(estimate > 0, -.2, .2))
+
+ggplot(data) + 
+  geom_errorbar(aes(x = feature, ymin = ci_lb, ymax = ci_ub), width = .4, linewidth = .3) +
+  geom_point(aes(x = feature, y = estimate), size = 2) +
+  geom_hline(yintercept = 0, linetype = 'longdash', linewidth = .3) +
+  geom_text(aes(x = feature, y = ypos, label = plab), color = 'red', angle = 90, vjust = .9) +
+  labs(x = '', y = 'estimate ± CI (95%)') +
+  theme_pubr() +
+  rotate_x_text(90) +
+  theme(aspect.ratio = 1/3.5, 
+        line = element_line(linewidth = .3),
+        axis.text = element_text(size = 10),
+        axis.ticks.length = unit(2, 'mm')) +
+  annotate('text', x = 60, y = .7, label = 'Enriched in IBD patient', hjust = 1) +
+  annotate('text', x = 5, y = -.8, label = 'Enriched in healthy control', hjust = 0) +
+  annotate('rect', xmin = .5, xmax = 27.5, ymin = -1, ymax = 0, alpha = .1, fill = '#67a9cf') +
+  annotate('rect', xmin = 27.5, xmax = 68.5, ymin = 0, ymax = .85, alpha = .1, fill = '#ef8a62')
+ggsave('cFam.meta-analysis.pdf', width = 11, height = 4)
+
+#### cFam procrustes ####
+plots <- map(proj_names, ~ {
+  data_x <- profile_transRA(tpms[[.x]])
+  data_y <- fread(paste0('../profile/', .x, '.kk2.s.gz')) %>% 
+    column_to_rownames('name') %>% 
+    profile_transRA() %>% 
+    dplyr::select(any_of(colnames(data_x)))
+  plot_Procrustes(data_x, data_y, dis_method = 'bray', title = .x, 
+                  colors = c('#e64b35', '#4dbbd5'), aspect_ratio = NULL) + 
+    coord_fixed() } )
+cowplot::plot_grid(plotlist = plots, nrow = 2, align = 'v')
+ggsave('cFam.procrustes.boxplot.pdf', width = 25, height = 10)
+
+#### cFam DESeq2 ####
+library(DESeq2)
+
+rcs <- readRDS('cFam.rcs.rds')
+
+diffs <- map(proj_names, \(x) {
+  data <- rcs[[x]]
+  data <- data[colSums(data) > 100]
+  group <- read.delim(paste0('../profile/', x, '.sample_group')) %>% 
+    dplyr::select(sample, group) %>% 
+    dplyr::filter(sample %in% colnames(data)) %>% 
+    arrange(match(sample, colnames(data))) %>% 
+    column_to_rownames('sample') %>% 
+    mutate(group = factor(group))
+  comparisons <- map(setdiff(unique(group$group), 'HC'), ~ c(.x, 'HC'))
+
+  dds <- DESeqDataSetFromMatrix(countData = data, colData = group, design = ~ group)
+  des <- DESeq(dds)
+  
+  map(comparisons, ~
+        data.frame(results(des, contrast = c('group', .x))) %>%
+        rownames_to_column('name') %>%
+        filter(!is.na(padj)) %>%
+        mutate(enriched = ifelse(log2FoldChange > 1 & padj < 0.05, .x[1], 
+                                 ifelse(log2FoldChange < -1 & padj < 0.05, .x[2], 'none')) ) ) %>% 
+    set_names(map_vec(comparisons, ~ paste0(.x, collapse = '_vs_')))  }) %>% 
+  set_names(proj_names) %>% 
+  list_flatten(name_spec = '{outer}|{inner}')
+saveRDS(diffs, 'cFam.DESeq2.rds')
+write.xlsx(diffs, 'cFam.DESeq2.xlsx')
+
+data <- map2_dfr(diffs, names(diffs), ~ add_column(.x, dataset = .y)) %>% 
+  add_plab(by = 'padj', format = 4) %>% 
+  filter(padj < 0.2) %>% 
+  mutate(log2FoldChange = ifelse(log2FoldChange > 5, 5, log2FoldChange),
+         log2FoldChange = ifelse(log2FoldChange < -5, -5, log2FoldChange))
+
+dist <- dplyr::select(data, name, dataset, value = log2FoldChange) %>% 
+  spread('name', 'value', fill = 0) %>% 
+  column_to_rownames('dataset') %>% 
+  dist
+dataset_level <- labels(dist)[hclust(dist)$order]
+
+dist <- dplyr::select(data, name, dataset, value = log2FoldChange) %>% 
+  spread('dataset', 'value', fill = 0) %>% 
+  column_to_rownames('name') %>% 
+  dist
+feature_level <- labels(dist)[hclust(dist)$order]
+
+mutate(data, 
+       dataset = factor(dataset, dataset_level),
+       name = factor(name, feature_level)) %>% 
+  ggplot() +
+  geom_tile(aes(name, dataset, fill = log2FoldChange), color = '#000000', linewidth = .4) +
+  geom_text(aes(name, dataset, label = plab), color = 'red', size = 4) +
+  scale_fill_gradient2(low = '#5ab4ac', mid = '#ffffff', high = '#d8b365', midpoint = 0) +
+  coord_fixed() +
+  theme_void() +
+  theme(axis.text = element_text(color = '#000000', size = 11, hjust = 1),
+        axis.text.x = element_text(angle = 90, hjust = 1))
+ggsave('cFam.DESeq2.tile.pdf', width = 18, height = 5)
+```
+
+## cGene diversity 20250802
+```{R}
+#### cGene diversity ####
+proj_names <- c('BushmanFD_2020','FranzosaEA_2018','HallAB_2017','HeQ_2017','KumbhariA_2024',
+                'LloydPriceJ_2019','SchirmerM_2018','SchirmerM_2024','WengY_2019','YanQ_2023c')
+
+tpms <- readRDS('cGene.tpms.rds')
+
+# shannon
+plots <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group)
+  group_level <- intersect(c('HC','IBD','CD','UC','IC'), unique(group$group))
+  calcu_alpha(tpms[[.x]], method = 'shannon') %>% 
+    plot_alpha(group, title = .x, ylab = 'Shannon Index', show_grid = F,
+               group_level = group_level, group_color = pald('npg') ) } )
+cowplot::plot_grid(plotlist = plots, nrow = 2, align = 'v')
+ggsave('cGene.shannon.boxplot.pdf', width = 15, height = 6)
+
+# richness
+plots <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group)
+  group_level <- intersect(c('HC','IBD','CD','UC','IC'), unique(group$group))
+  calcu_alpha(tpms[[.x]], method = 'richness') %>% 
+    plot_alpha(group, title = .x, ylab = 'Richness Index', show_grid = F,
+               group_level = group_level, group_color = pald('npg') ) } )
+cowplot::plot_grid(plotlist = plots, nrow = 2, align = 'v')
+ggsave('cGene.richness.boxplot.pdf', width = 15, height = 6)
+
+# pcoa
+plots <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group)
+  group_level <- intersect(c('HC','IBD','CD','UC','IC'), unique(group$group))
+  plot_PCoA(tpms[[.x]], group, display_type = 'point', add_group_label = T,
+            dis_method = 'bray', title = .x, group_color = pald('npg')) } )
+cowplot::plot_grid(plotlist = plots, nrow = 2, align = 'v')
+ggsave('cGene.pcoa.dotplot.pdf', width = 25, height = 9)
+
+# disper
+plots <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group)
+  group_level <- intersect(c('HC','IBD','CD','UC','IC'), unique(group$group))
+  disper <- calcu_betadisper(tpms[[.x]], group, group_level = group_level, 
+                             group_color = pald('npg'))
+  disper$plot + 
+    labs(title = .x, subtitle = paste0('Anova-P = ', signif(disper$anova$`Pr(>F)`[1], 3))) +
+    theme(aspect.ratio = 1,
+          axis.ticks.length = unit(2, 'mm'),
+          plot.title = element_text(hjust = .5, size = 12, face = 'bold')) } )
+cowplot::plot_grid(plotlist = plots, nrow = 2, align = 'v')
+ggsave('cGene.disper.boxplot.pdf', width = 15, height = 6)
+
+#### cGene difference ####
+data <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group)
+  comparisons <- map(setdiff(unique(group$group), 'HC'), ~ c(.x, 'HC'))
+  tpm <- profile_filter(tpms[[.x]], group, by_group = T, all_group = T, min_prevalence = .1)
+  map_dfr(comparisons, \(x) difference_analysis(tpm, group, comparison = x, add_enriched = T)) }) %>% 
+  set_names(proj_names)
+write.xlsx(data, 'cGene.diffs.xlsx')
+
+#### cGene meta-analysis ####
+data <- map(proj_names, ~ {
+  data <- profile_filter(tpms[[.x]], group, by_group = T, all_group = T, min_prevalence = .1)
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group)
+  comparisons <- map(setdiff(unique(group$group), 'HC'), ~ c(.x, 'HC'))
+  
+  mean_data <- data.frame(t(data)) %>% 
+    mutate(group = group$group[match(rownames(.), group$sample)]) %>% 
+    group_by(group) %>% 
+    summarise_all(mean) %>% 
+    ungroup %>% 
+    column_to_rownames('group')
+  
+  sd_data <- data.frame(t(data)) %>% 
+    mutate(group = group$group[match(rownames(.), group$sample)]) %>% 
+    group_by(group) %>% 
+    summarise_all(sd) %>% 
+    ungroup %>% 
+    column_to_rownames('group')
+  
+  n_data <- data.frame(t(data)) %>% 
+    mutate(group = group$group[match(rownames(.), group$sample)]) %>%
+    count(group) %>% 
+    column_to_rownames('group')
+  
+  map(comparisons, \(x) 
+      data.frame(m1 = unlist(mean_data[x[1],]),
+                 sd1 = unlist(sd_data[x[1],]),
+                 n1 = n_data[x[1],]) %>% 
+        rownames_to_column('name') %>%
+        add_column(m2 = unlist(mean_data[x[2],]),
+                   sd2 = unlist(sd_data[x[2],]),
+                   n2 = n_data[x[2],])) %>% 
+    set_names(map_vec(comparisons, \(x) paste0(x, collapse = '_vs_')))  }) %>% 
+  set_names(proj_names)
+
+names <- map(data, \(x) map(x, \(y) pull(y, name))) %>% 
+  flatten() %>% 
+  reduce(~ intersect(.x, .y))
+
+meta_in <- map(names, \(x) 
+               map_dfr(proj_names, \(y)
+                       map2_dfr(data[[y]], names(data[[y]]), \(a, b)
+                                filter(a, name == x) %>% 
+                                  add_column(name2 = paste0(y, '.', b)))) %>% 
+                 dplyr::select(-name) %>% 
+                 rename(name = name2) %>% 
+                 relocate(name)) %>% 
+  set_names(names)
+
+meta_out <- map_dfr(names, ~ calcu_metafor.1(meta_in[[.x]]) %>% 
+                      mutate(padj = p.adjust(pval, method = 'BH')) %>% 
+                      add_column(feature = .x, .before = 1))
+write.xlsx(meta_out, 'cGene.meta-analysis.xlsx')
+
+#### cGene procrustes ####
+plots <- map(proj_names, ~ {
+  data_x <- profile_transRA(tpms[[.x]])
+  data_y <- fread(paste0('../profile/', .x, '.kk2.s.gz')) %>% 
+    column_to_rownames('name') %>% 
+    profile_transRA() %>% 
+    dplyr::select(any_of(colnames(data_x)))
+  plot_Procrustes(data_x, data_y, dis_method = 'bray', title = .x, 
+                  colors = c('#e64b35', '#4dbbd5'), aspect_ratio = NULL) + 
+    coord_fixed() })
+cowplot::plot_grid(plotlist = plots, nrow = 2, align = 'v')
+ggsave('cGene.procrustes.boxplot.pdf', width = 25, height = 10)
+```
+
+## mediation analysis (test) 20250822
+
+```{R}
+#### MEM - overall ####
+library(compositions)   # CLR 转换
+library(mediation)      # 中介分析
+
+proj_names <- c('BushmanFD_2020','FranzosaEA_2018','HallAB_2017','HeQ_2017','KumbhariA_2024',
+                'LloydPriceJ_2019','SchirmerM_2018','SchirmerM_2024','WengY_2019','YanQ_2023c')
+
+# pcoa
+cFam <- readRDS('cFam.tpms.rds')
+data <- map(proj_names, ~ {
+  .data_x <- fread(paste0('../profile/', .x, '.kk2.g.gz')) %>%
+    column_to_rownames('name')
+  .data_y <- profile_transRA(cFam[[.x]], base = 1)
+  
+  left_join(calcu_PCoA(.data_x, dim = 3)$point %>% 
+              rename_with(~ gsub('PC', 'genusPCo', .x)), 
+            calcu_PCoA(.data_y, dim = 3)$point %>% 
+              rename_with(~ gsub('PC', 'cFamPCo', .x)), 
+            by = 'sample') } ) %>% 
+  set_names(proj_names)
+saveRDS(data, 'MEM/PCo_data.rds')
+
+# pca
+data <- map(proj_names, ~ {
+  .data_x <- fread(paste0('../profile/', .x, '.kk2.g.gz')) %>%
+    column_to_rownames('name') %>% 
+    t %>% clr %>% data.frame()
+  .data_y <- profile_transRA(cFam[[.x]], base = 1) %>% 
+    t %>% clr %>% data.frame()
+  
+  left_join(calcu_PCA(t(.data_x), dim = 3)$point %>% 
+              rename_with(~ gsub('PCA', 'genusPC', .x)), 
+            calcu_PCA(t(.data_y), dim = 3)$point %>%
+              rename_with(~ gsub('PCA', 'cFamPC', .x)), 
+            by = 'sample') } ) %>% 
+  set_names(proj_names)
+saveRDS(data, 'MEM/PC_data.rds')
+
+# model PC
+data <- readRDS('MEM/PC_data.rds') 
+
+MEM <- map_dfr(proj_names, ~ {
+  .data <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group) %>% 
+    mutate(group = ifelse(group != 'HC', 'IBD', 'HC'),
+           group = factor(group)) %>% 
+    left_join(data[[.x]], by = 'sample')
+  
+  # 中介模型: 定植因子 ~ disease
+  med_fit <- lm(cFamPC1 ~ group, data = .data)
+  # 结果模型: 菌群丰度 ~ disease + 定植因子
+  out_fit <- lm(reformulate(c('group','cFamPC1'), response = 'genusPC1'), data = .data)
+  # 中介分析
+  med_out <- mediate(med_fit, out_fit, treat = 'group', mediator = 'cFamPC1', 
+                     boot = TRUE, sims = 500) %>% suppressMessages()
+  tibble(
+    dataset = .x,
+    model = 'IBD->cFamPC1->genusPC1',
+    ACME = med_out$d0,  # 间接效应
+    ADE = med_out$z0,   # 直接效应
+    TotalEffect = med_out$tau.coef,
+    PropMediated = med_out$n0,
+    p_ACME = med_out$d0.p,
+    p_ADE = med_out$z0.p,
+    p_Total = med_out$tau.p) }, .progress= T )
+write.xlsx(MEM, 'MEM/PC_MEM.xlsx')
+
+# model PCo
+data <- readRDS('MEM/PCo_data.rds') 
+
+MEM <- map_dfr(proj_names, ~ {
+  .data <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group) %>% 
+    mutate(group = ifelse(group != 'HC', 'IBD', 'HC'),
+           group = factor(group)) %>% 
+    left_join(data[[.x]], by = 'sample')
+  
+  # 中介模型: 定植因子 ~ disease
+  med_fit <- lm(cFamPCo1 ~ group, data = .data)
+  # 结果模型: 菌群丰度 ~ disease + 定植因子
+  out_fit <- lm(reformulate(c('group','cFamPCo1'), response = 'genusPCo1'), data = .data)
+  # 中介分析
+  med_out <- mediate(med_fit, out_fit, treat = 'group', mediator = 'cFamPCo1', 
+                     boot = TRUE, sims = 500) %>% suppressMessages()
+  tibble(
+    dataset = .x,
+    model = 'IBD->cFamPCo1->genusPCo1',
+    ACME = med_out$d0,  # 间接效应
+    ADE = med_out$z0,   # 直接效应
+    TotalEffect = med_out$tau.coef,
+    PropMediated = med_out$n0,
+    p_ACME = med_out$d0.p,
+    p_ADE = med_out$z0.p,
+    p_Total = med_out$tau.p) }, .progress= T )
+write.xlsx(MEM, 'MEM/PCo_MEM.xlsx')
+
+#### MEM - pairwise ####
+
+for (i in proj_names) {
+  df_microbe <- fread(paste0('../profile/', i, '.kk2.g.gz')) %>%
+    filter(!grepl('UBA|CAG|MGYG|CA|UMG|CF|RUG|QA|QH|QF|NSJ|HGM|F0040|F0040|
+                  SF|RC9|RF16|F082|D5|An172|DTU089|ER4|An92|An92|UCG-010|VUNA01|
+                  VUNA01|F0422|Mt11|NC2004|SF|TWA4|TM7x|V9D3004|VSOB01|VUNI01|
+                  WRGP01|ZJ304', name) & !grepl('-', name)) %>% 
+    column_to_rownames('name') %>%
+    t %>% data.frame()
+  df_microbe <- data.frame(clr(df_microbe + 1e-6)) %>%
+    rownames_to_column('sample')
+  
+  df_cFam <- readRDS('cFam.tpms.rds')[[i]] %>%
+    profile_transRA() %>%
+    t %>% data.frame()
+  df_cFam <- data.frame(clr(df_cFam + 1e-6)) %>%
+    rownames_to_column('sample')
+  
+  df_meta <- read.delim(paste0('../profile/', i, '.sample_group')) %>%
+    dplyr::select(sample, group) %>%
+    mutate(group = ifelse(group != 'HC', 'IBD', 'HC'),
+           group = factor(group)) %>% 
+    left_join(df_cFam, by = 'sample') %>%
+    left_join(df_microbe, by = 'sample')
+  write.table(df_meta, paste0('MEM/', i, '.df_meta.tsv'), sep = '\t', quote = F, row.names = F)
+  colnames(df_cFam)[-1] %>% data.frame(name = .) %>% 
+    write.table(paste0('MEM/', i, '.cFam.list.tsv'), sep = '\t', quote = F, row.names = F)
+  colnames(df_microbe)[-1] %>% data.frame(name = .) %>% 
+    write.table(paste0('MEM/', i, '.microbe.list.tsv'), sep = '\t', quote = F, row.names = F)
+}
+
+run_mediation <- function(data, cFam_name, microbe_name) {
+  data <- dplyr::rename(data, cFam = {{cFam_name}}, microbe = {{microbe_name}})
+  # 中介模型: 定植因子 ~ disease + 协变量
+  med_fit <- lm(reformulate('group', response = 'cFam'), data = data)
+  # 结果模型: 菌群丰度 ~ disease + 定植因子 + 协变量
+  out_fit <- lm(reformulate(c('group', 'cFam'), response = 'microbe'), data = data)
+  # 中介分析（注意 mediator 需要字符串）
+  med_out <- mediate(med_fit, out_fit, treat = 'group', mediator = 'cFam', boot = TRUE, sims = 500)
+  
+  tibble(
+    cFam = cFam_name,
+    microbe = microbe_name,
+    ACME = med_out$d0,           # 间接效应
+    ADE = med_out$z0,            # 直接效应
+    TotalEffect = med_out$tau.coef,
+    PropMediated = med_out$n0,
+    p_ACME = med_out$d0.p,
+    p_ADE = med_out$z0.p,
+    p_Total = med_out$tau.p
+  )
+}
+
+args <- commandArgs(T)
+
+results <- map_dfr(microbes[1:5], ~ run_mediation(data, 'CF1', .x))
+```
+
+## RF-ML discirminate IBD patients from HC 20250825
+
+```{R}
+#### cFam ####
+proj_names <- c('BushmanFD_2020','FranzosaEA_2018','HallAB_2017','HeQ_2017','KumbhariA_2024',
+                'LloydPriceJ_2019','SchirmerM_2018','SchirmerM_2024','WengY_2019','YanQ_2023c')
+
+tpms <- readRDS('cFam.tpms.rds')
+
+# rf
+roc <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group) %>% 
+    mutate(group = ifelse(group == 'HC', 'HC', 'IBD'))
+  pred <- rf_Kfold(tpms[[.x]], group, k = 10, seed = 2025)
+  pred <- left_join(pred, group, by = 'sample')
+  roc(pred$group, pred$HC) }) %>% 
+  set_names(proj_names)
+
+plot_roc_multiple(roc, title = 'Random Forest Model')
+ggsave('cFam.model.rf.roc.pdf', width = 8, height = 4)
+
+# svm
+roc <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group) %>% 
+    mutate(group = ifelse(group == 'HC', 'HC', 'IBD'))
+  pred <- svm_Kfold(tpms[[.x]], group, k = 10, seed = 2025)
+  pred <- left_join(pred, group, by = 'sample')
+  roc(pred$group, pred$HC) }) %>% 
+  set_names(proj_names)
+plot_roc_multiple(roc, title = 'Support Vector Machine Model')
+ggsave('cFam.model.svm.roc.pdf', width = 8, height = 4)
+
+# lasso
+roc <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group) %>% 
+    mutate(group = ifelse(group == 'HC', 'HC', 'IBD'))
+  pred <- lasso_Kfold(tpms[[.x]], group, k = 10, seed = 2025)
+  pred <- left_join(pred, group, by = 'sample')
+  roc(pred$group, pred$pred) }) %>% 
+  set_names(proj_names)
+plot_roc_multiple(roc, title = 'Least Absolute Shrinkage and Selection Operator Model')
+ggsave('cFam.model.lasso.roc.pdf', width = 8, height = 4)
+
+#### cGene ####
+proj_names <- c('BushmanFD_2020','FranzosaEA_2018','HallAB_2017','HeQ_2017','KumbhariA_2024',
+                'LloydPriceJ_2019','SchirmerM_2018','SchirmerM_2024','WengY_2019','YanQ_2023c')
+
+tpms <- readRDS('cGene.tpms.rds')
+
+# rf
+roc <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group) %>% 
+    mutate(group = ifelse(group == 'HC', 'HC', 'IBD'))
+  pred <- rf_Kfold(tpms[[.x]], group, k = 10, seed = 2025)
+  pred <- left_join(pred, group, by = 'sample')
+  roc(pred$group, pred$HC) }) %>% 
+  set_names(proj_names)
+plot_roc_multiple(roc, title = 'Random Forest Model')
+ggsave('cGene.model.rf.roc.pdf', width = 8, height = 4)
+
+# svm
+roc <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group) %>% 
+    mutate(group = ifelse(group == 'HC', 'HC', 'IBD'))
+  pred <- svm_Kfold(tpms[[.x]], group, k = 10, seed = 2025)
+  pred <- left_join(pred, group, by = 'sample')
+  roc(pred$group, pred$HC) }) %>% 
+  set_names(proj_names)
+plot_roc_multiple(roc, title = 'Support Vector Machine Model')
+ggsave('cGene.model.svm.roc.pdf', width = 8, height = 4)
+
+# lasso
+roc <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group) %>% 
+    mutate(group = ifelse(group == 'HC', 'HC', 'IBD'))
+  pred <- lasso_Kfold(tpms[[.x]], group, k = 10, seed = 2025)
+  pred <- left_join(pred, group, by = 'sample')
+  roc(pred$group, pred$pred) }) %>% 
+  set_names(proj_names)
+plot_roc_multiple(roc, title = 'Least Absolute Shrinkage and Selection Operator Model')
+ggsave('cGene.model.lasso.roc.pdf', width = 8, height = 4)
+
+#### taxa ####
+proj_names <- c('BushmanFD_2020','FranzosaEA_2018','HallAB_2017','HeQ_2017','KumbhariA_2024',
+                'LloydPriceJ_2019','SchirmerM_2018','SchirmerM_2024','WengY_2019','YanQ_2023c')
+
+# rf
+roc <- map(proj_names, ~ {
+  group <- read.delim(paste0('../profile/', .x, '.sample_group')) %>% 
+    dplyr::select(sample, group) %>% 
+    mutate(group = ifelse(group == 'HC', 'HC', 'IBD'))
+  profile <- fread(paste0('../profile/', .x, '.kk2.g.gz')) %>% 
+    column_to_rownames('name')
+  pred <- rf_Kfold(profile, group, k = 10, seed = 2025)
+  pred <- left_join(pred, group, by = 'sample')
+  roc(pred$group, pred$HC) }) %>% 
+  set_names(proj_names)
+plot_roc_multiple(roc, title = 'Random Forest Model')
+ggsave('taxa.g.model.rf.roc.pdf', width = 8, height = 4)
+```

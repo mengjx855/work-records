@@ -1,0 +1,607 @@
+---
+title: "MGX 16S PEDV Sus feces HuangYW"
+author: "Jinxin Meng"
+date: "2025-02-23"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## 16S amplicon analysis
+
+```{R}
+#### info ####
+group <- read.delim('../data/fecal_group.tsv') %>% 
+  mutate(dpi = factor(dpi, c(0, 1, 3, 7, 14))) %>% 
+  arrange(desc(treatment), dpi) %>% 
+  mutate(group = factor(group, unique(group)))
+
+profile <- read.delim('../data/fecal_profile.tsv', row.names = 1) %>% 
+  select(all_of(group$sample)) %>% 
+  profile_filter(by_group = F, min_prevalence = .05)
+
+tax <- read.delim('../data/fecal_taxa.tsv') %>% 
+  filter(name %in% rownames(profile))
+
+tr <- ape::read.tree('../data/fecal_tree.nwk')
+
+picrust2 <- read.delim('../data/fecal_PICRUSt2.tsv', row.names = 1) %>% 
+  select(all_of(group$sample)) %>% 
+  profile_filter(by_group = F, min_prevalence = .05)
+
+group_level <- c('NC_0dpi','NC_1dpi','NC_3dpi','NC_7dpi','NC_14dpi',
+                 'd2_0dpi','d2_1dpi','d2_3dpi','d2_7dpi','d2_14dpi',
+                 'wt_0dpi','wt_1dpi','wt_3dpi','wt_7dpi','wt_14dpi')
+group_color <- structure(c('#f0f0f0','#d9d9d9','#bdbdbd','#969696','#737373',
+                           '#e5f5e0','#c7e9c0','#a1d99b','#74c476','#41ab5d',
+                           '#fff7bc','#fee391','#fec44f','#fe9929','#ec7014'),
+                         names = group_level)
+
+#### PCoA ####
+source("/code/R_func/plot_PCoA.R")
+source("/code/R_func/calcu_diff.R")
+
+map(levels(group$dpi), \(x) {
+  group_x <- filter(group, dpi == x)
+  profile_x <- dplyr::select(profile, all_of(group_x$sample))
+  plot_PCoA(profile_x, group_x, group_level = group_level, group_color = group_color, 
+            dis_method = "bray", display_type = "line", add_group_label = T,
+            lab_size = 3, ellipse_level = .85, show_legend = F, show_grid = T,
+            show_line = F, title = paste0('Bray-Curtis PCoA | ', x, '-dpi')) }) %>% 
+  cowplot::plot_grid(plotlist = ., nrow = 1, align = 'h') 
+ggsave('PCoA.facet_by_dpi.pdf', width = 20, height = 4)
+
+map(unique(group$treatment), \(x) {
+  group_x <- filter(group, treatment == x)
+  profile_x <- dplyr::select(profile, all_of(group_x$sample))
+  plot_PCoA(profile_x, group_x, group_level = group_level, group_color = group_color, 
+            dis_method = "bray", display_type = "line", add_group_label = T,
+            lab_size = 3, ellipse_level = .85, show_legend = F, show_grid = T,
+            show_line = F, title = paste0('Bray-Curtis PCoA | ', x, '-dpi')) }) %>% 
+  cowplot::plot_grid(plotlist = ., nrow = 1, align = 'h')
+ggsave('PCoA.facet_by_treat.pdf', width = 12, height = 4)
+
+plot_PCoA(profile, group, dis_method = "bray", display_type = "line", 
+          group_level = group_level, group_color = group_color, 
+          add_group_label = T, lab_size = 2, ellipse_level = .85,
+          show_legend = F, show_grid = F, title = 'Bray-Curtis PCoA')
+ggsave('PCoA.pdf', width = 7, height = 5)
+
+data <- calcu_PCoA(profile, dim = 2, dis_method = 'bray', adonis2 = F)
+
+# PC1
+plot_data <- data$point %>% 
+  left_join(group, by = 'sample') %>% 
+  select(sample, value = PC1, group)
+
+comparisons <- calcu_diff(select(plot_data, -group), group, 
+                          group_level = group_level) %>% 
+  filter(pval < 0.05) %>% 
+  pull(comparison) %>% 
+  strsplit('_vs_')
+
+ggboxplot(plot_data, 'group', 'value', fill = 'group', palette = group_color,
+          x.text.angle = 90, legend = 'none', width = .6, xlab = '',
+          ylab = 'PC1') +
+  scale_y_continuous(breaks = seq(-.5, .5, .25), labels = seq(-.5, .5, .25), 
+                     limits = c(-.51, NA)) +
+  stat_compare_means(comparisons = comparisons, label = 'p.signif', tip.length = 0, 
+                     step.increase = .05, vjust = .7)
+ggsave('PCoA.PC1.pdf', width = 4, height = 5)
+
+# PC2
+plot_data <- data$point %>% 
+  left_join(group, by = 'sample') %>% 
+  select(sample, value = PC2, group)
+
+comparisons <- calcu_diff(select(plot_data, -group), group, 
+                          group_level = group_level) %>% 
+  filter(pval < 0.05) %>% 
+  pull(comparison) %>% 
+  strsplit('_vs_')
+
+ggboxplot(plot_data, 'group', 'value', fill = 'group', palette = group_color,
+          x.text.angle = 90, legend = 'none', width = .6, xlab = '',
+          ylab = 'PC2') +
+  scale_y_continuous(breaks = seq(-.4, .4, .2), labels = seq(-.4, .5, .2), 
+                     limits = c(-.41, NA)) +
+  stat_compare_means(comparisons = comparisons, label = 'p.signif', tip.length = 0, 
+                     step.increase = .03, vjust = 1.2, size = 3)
+ggsave('PCoA.PC2.pdf', width = 4, height = 7.5)
+
+#### adonis ####
+distance <- calcu_distance(profile, dis_method = 'bray')
+
+group <- group[match(rownames(as.matrix(distance)), group$sample),]
+
+adonis <- adonis2(distance ~ infection + dpi, group, by = "margin", permutations = 999)
+
+data.frame(adonis) %>% 
+  rownames_to_column('name') %>% 
+  write.xlsx('PCoA.adonis.xlsx')
+
+data.frame(adonis) %>% 
+  head(2) %>% 
+  rownames_to_column('name') %>% 
+  rename(pval = 'Pr..F.') %>% 
+  mutate(R2 = round(R2, 4)) %>% 
+  ggbarplot('name', 'R2', fill = 'grey', label = .$R2, xlab = '', ylab = 'R2',
+            width = .6) 
+ggsave('PCoA.adonis.pdf', width = 3, height = 4)  
+
+#### 多样性 ####
+source('/code/R_func/diversity.R')
+
+map2(c('richness', 'shannon', 'pd'),
+     c('Richness', 'Shannon', "Faith's phylogenetic"), \(x, y) {
+       data <- calcu_alpha(profile, method = x, tree = tr) %>% 
+         left_join(group, by = 'sample') %>% 
+         arrange(desc(treatment), dpi) %>% 
+         mutate(group = factor(group, unique(group)))
+       
+       comparisons <- calcu_diff(select(data, sample, value), group) %>% 
+         filter(pval < 0.05) %>% 
+         pull(comparison) %>% 
+         strsplit('_vs_')
+               
+       ggboxplot(data, 'group', 'value', fill = 'group', palette = group_color, 
+                 legend = 'none', outlier.size = 1, xlab = '', x.text.angle = 60,
+                 ylab = paste0(y, " diversity")) +
+         stat_compare_means(comparisons = comparisons, label = 'p.signif',
+                                    step.increase = .06, vjust = .7, tip.length = .02) +
+                 theme(aspect.ratio = 1) }) %>% 
+  cowplot::plot_grid(plotlist = ., ncol = 1, align = 'h')
+ggsave('div.alpha.by_index.pdf', width = 6, height = 15)
+
+#### 组成 ####
+library(ggalluvial)
+source('/code/R_func/taxa.R')
+
+# multiple
+plot_compos_multiple(profile, tax, group, group_level = group_level)
+ggsave(file = "compos.multiple.barplot.pdf", width = 24, height = 10)
+
+# phylum
+data <- taxa_trans(profile, tax, group, to = 'phylum', other_name = 'p__Other', 
+                   smp2grp = T, transRA = T) %>% 
+  rownames_to_column('name') %>% 
+  gather(key = 'group', value = 'value', -name) %>% 
+  mutate(group = factor(group, unique(group))) %>% 
+  mutate(class = str_sub(group, 1, 2))
+
+colors <- c("#80b1d3","#b3de69","#fdb462","#8dd3c7","#bc80bd","#fb8072",
+            "#ffed6f","#fccde5","#bebada","#ccebc5","#d9d9d9","#ffffb3")
+
+ggplot(data, aes(group, value, alluvium = name, stratum = name)) +
+  geom_stratum(aes(fill = name), width = .5, lwd = .4, color = "black") +
+  geom_alluvium(aes(fill = name), alpha = .5, width = .5) + 
+  facet_grid(cols = vars(class), scales = 'free') +
+  scale_fill_manual(values = colors) +
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(x = "", y = "Relative Abundance(%)", fill = '') +
+  theme_classic() + 
+  theme(axis.ticks = element_line(linewidth = .4, color = "black"),
+        axis.title = element_text(size = 10, color = "black"),
+        axis.text = element_text(size = 10, color = "black"),
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.line = element_line(linewidth = .4, color = "black"),
+        strip.background = element_rect(linewidth = .4, color = "black"),
+        panel.grid = element_blank(),
+        panel.background = element_rect(fill = 'transparent'), 
+        plot.margin = unit(c(1, 1, 1, 1), "mm"))
+ggsave('compos.phylum.barplot.pdf', width = 6, height = 4)
+
+# family
+data <- taxa_trans(profile, tax, group, to = 'family', other_name = 'f__Other', 
+                   smp2grp = T, transRA = T) %>% 
+  rownames_to_column('name') %>% 
+  gather(key = 'group', value = 'value', -name) %>% 
+  mutate(group = factor(group, unique(group))) %>% 
+  mutate(class = str_sub(group, 1, 2))
+
+colors <- c('#80b1d3','#b3de69','#fdb462','#ccebc5','#ffffb3','#bebada',
+            '#8dd3c7','#fb8072','#d9d9d9','#fccde5','#bc80bd','#ffed6f')
+
+ggplot(data, aes(group, value, alluvium = name, stratum = name)) +
+  geom_stratum(aes(fill = name), width = .5, lwd = .4, color = "black") +
+  geom_alluvium(aes(fill = name), alpha = .5, width = .5) + 
+  facet_grid(cols = vars(class), scales = 'free') +
+  scale_fill_manual(values = colors) +
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(x = "", y = "Relative Abundance(%)", fill = '') +
+  theme_classic() + 
+  theme(axis.ticks = element_line(linewidth = .4, color = "black"),
+        axis.title = element_text(size = 10, color = "black"),
+        axis.text = element_text(size = 10, color = "black"),
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.line = element_line(linewidth = .4, color = "black"),
+        strip.background = element_rect(linewidth = .4, color = "black"),
+        panel.grid = element_blank(),
+        panel.background = element_rect(fill = 'transparent'), 
+        plot.margin = unit(c(1, 1, 1, 1), "mm"))
+ggsave('compos.family.barplot.pdf', width = 6.2, height = 4)
+
+# genus
+data <- taxa_trans(profile, tax, group, to = 'genus', other_name = 'g__Other', 
+                   smp2grp = T, transRA = T) %>% 
+  rownames_to_column('name') %>% 
+  gather(key = 'group', value = 'value', -name) %>% 
+  mutate(group = factor(group, unique(group))) %>% 
+  mutate(class = str_sub(group, 1, 2))
+
+colors <- c('#80b1d3','#b3de69','#fdb462','#ccebc5','#ffffb3','#bebada',
+            '#8dd3c7','#fb8072','#d9d9d9','#fccde5','#bc80bd','#ffed6f')
+
+ggplot(data, aes(group, value, alluvium = name, stratum = name)) +
+  geom_stratum(aes(fill = name), width = .5, lwd = .4, color = "black") +
+  geom_alluvium(aes(fill = name), alpha = .5, width = .5) + 
+  facet_grid(cols = vars(class), scales = 'free') +
+  scale_fill_manual(values = colors) +
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(x = "", y = "Relative Abundance(%)", fill = '') +
+  theme_classic() + 
+  theme(axis.ticks = element_line(linewidth = .4, color = "black"),
+        axis.title = element_text(size = 10, color = "black"),
+        axis.text = element_text(size = 10, color = "black"),
+        axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.line = element_line(linewidth = .4, color = "black"),
+        strip.background = element_rect(linewidth = .4, color = "black"),
+        panel.grid = element_blank(),
+        panel.background = element_rect(fill = 'transparent'), 
+        plot.margin = unit(c(1, 1, 1, 1), "mm"))
+ggsave('compos.genus.barplot.pdf', width = 6.7, height = 4)
+
+#### 差异 ####
+source('/code/R_func/taxa.R')
+source('/code/R_func/difference_analysis.R')
+
+# infection or not
+comparisons <- list('_0dpi_wt_vs_NC' = c('wt_0dpi','NC_0dpi'),
+                    '_1dpi_wt_vs_NC' = c('wt_1dpi','NC_1dpi'),
+                    '_3dpi_wt_vs_NC' = c('wt_3dpi','NC_3dpi'),
+                    '_7dpi_wt_vs_NC' = c('wt_7dpi','NC_7dpi'),
+                    '_14dpi_wt_vs_NC' = c('wt_14dpi','NC_14dpi'))
+
+# phylum
+data <- taxa_trans(profile, tax, group, to = 'phylum', out_all = T, transRA = T)
+group_x <- select(group, sample, group)
+
+diffs <- map(comparisons, ~ 
+               difference_analysis(data, group_x, comparison = .x, add_enriched = T))
+write.xlsx(diffs, 'compos.phylum.diffs.xlsx')
+
+# family
+data <- taxa_trans(profile, tax, group, to = 'family', out_all = T, transRA = T)
+group_x <- select(group, sample, group)
+
+diffs <- map(comparisons, ~ 
+               difference_analysis(data, group_x, comparison = .x, add_enriched = T))
+write.xlsx(diffs, 'compos.family.diffs.xlsx')
+
+# genus
+data <- taxa_trans(profile, tax, group, to = 'genus', out_all = T, transRA = T)
+group_x <- select(group, sample, group)
+
+diffs <- map(comparisons, ~ 
+               difference_analysis(data, group_x, comparison = .x, add_enriched = T))
+write.xlsx(diffs, 'compos.genus.diffs.xlsx')
+
+#### taxa maaslin2 ####
+library(Maaslin2)
+
+data <- taxa_trans(profile, tax, to = 'family', out_all = T, transRA = T) %>% 
+  profile_filter(min_prevalence = .1, by_group = F)
+group_x <- select(group, sample, treatment, dpi, pig) %>% 
+  column_to_rownames('sample') %>% 
+  mutate(dpi = as.numeric(dpi))
+
+# 固定效应是是否攻毒以及时间
+# 随机效应模型是不同猪
+Maaslin2(data, group_x, output = 'maaslin2_family_out', analysis_method = "LM",
+         normalization = 'NONE', transform = 'LOG', correction = 'bonferroni', 
+         fixed_effects = c('treatment', 'dpi'), random_effects = c('pig'), 
+         reference = 'treatment,NC', save_models = T, save_scatter = T)
+
+# 混合效应模型
+data_x <- data['g__Bacteroides',] %>% 
+  t %>% 
+  data.frame %>% 
+  rename(value = 1) %>% 
+  rownames_to_column('sample') %>% 
+  left_join(group, by = 'sample') %>% 
+  mutate(dpi = as.numeric(dpi),
+         treatment = factor(treatment, c('NC', 'd2', 'wt')))
+
+library(lmerTest)
+model <- lmer(value ~ treatment * dpi + (1 | pig), data_x)
+summary(model)
+
+shapiro.test(residuals(model))
+
+emmeans::emmeans(model, pairwise ~ treatment)
+
+#### picrust2 maaslin2 ####
+group_x <- select(group, sample, treatment, dpi, pig) %>% 
+  column_to_rownames('sample') %>% 
+  mutate(dpi = as.numeric(dpi))
+
+# 固定效应是是否攻毒以及时间
+# 随机效应模型是不同猪
+library(Maaslin2)
+Maaslin2(picrust2, group_x, output = 'maaslin2_picrust2_out', analysis_method = "LM",
+         normalization = 'NONE', transform = 'LOG', correction = 'bonferroni', 
+         fixed_effects = c('treatment', 'dpi'), random_effects = c('pig'),
+         reference = 'treatment,NC', save_models = T, save_scatter = T)
+
+# infection or not
+comparisons <- list('_0dpi_wt_vs_NC' = c('wt_0dpi','NC_0dpi'),
+                    '_1dpi_wt_vs_NC' = c('wt_1dpi','NC_1dpi'),
+                    '_3dpi_wt_vs_NC' = c('wt_3dpi','NC_3dpi'),
+                    '_7dpi_wt_vs_NC' = c('wt_7dpi','NC_7dpi'),
+                    '_14dpi_wt_vs_NC' = c('wt_14dpi','NC_14dpi'))
+
+group_x <- select(group, sample, group)
+
+diffs <- map(comparisons, ~ 
+               difference_analysis(picrust2, group_x, comparison = .x, add_enriched = T))
+write.xlsx(diffs, 'func.picrust2.diffs.xlsx')
+
+#### KO_lvC maaslin2 #### 
+KO_lvC <- read.delim('../data/fecal_KO_lvC.tsv', row.names = 1) %>% 
+  select(all_of(group$sample)) %>% 
+  profile_filter(by_group = F, min_prevalence = .05)
+
+group_x <- select(group, sample, treatment, dpi, pig) %>% 
+  column_to_rownames('sample') %>% 
+  mutate(dpi = as.numeric(dpi))
+
+# 固定效应是是否攻毒以及时间
+# 随机效应模型是不同猪
+Maaslin2(KO_lvC, group_x, output = 'maaslin2_KO_lvC_out', analysis_method = "LM",
+         normalization = 'NONE', transform = 'LOG', correction = 'bonferroni', 
+         fixed_effects = c('treatment', 'dpi'), random_effects = c('pig'),
+         reference = 'treatment,NC', save_models = T, save_scatter = T)
+
+# infection or not
+comparisons <- list('_0dpi_wt_vs_NC' = c('wt_0dpi','NC_0dpi'),
+                    '_1dpi_wt_vs_NC' = c('wt_1dpi','NC_1dpi'),
+                    '_3dpi_wt_vs_NC' = c('wt_3dpi','NC_3dpi'),
+                    '_7dpi_wt_vs_NC' = c('wt_7dpi','NC_7dpi'),
+                    '_14dpi_wt_vs_NC' = c('wt_14dpi','NC_14dpi'))
+
+group_x <- select(group, sample, group)
+
+diffs <- map(comparisons, ~ 
+               difference_analysis(KO_lvC, group_x, comparison = .x, add_enriched = T))
+write.xlsx(diffs, 'func.KO_lvC.diffs.xlsx')
+
+#### KO diff #### 
+KO <- read.delim('../data/fecal_KO.tsv', row.names = 1) %>% 
+  select(all_of(group$sample)) %>% 
+  profile_filter(by_group = F, min_prevalence = .05)
+
+group_x <- select(group, sample, treatment, dpi, pig) %>% 
+  column_to_rownames('sample') %>% 
+  mutate(dpi = as.numeric(dpi))
+
+# infection or not
+comparisons <- list('_0dpi_wt_vs_NC' = c('wt_0dpi','NC_0dpi'),
+                    '_1dpi_wt_vs_NC' = c('wt_1dpi','NC_1dpi'),
+                    '_3dpi_wt_vs_NC' = c('wt_3dpi','NC_3dpi'),
+                    '_7dpi_wt_vs_NC' = c('wt_7dpi','NC_7dpi'),
+                    '_14dpi_wt_vs_NC' = c('wt_14dpi','NC_14dpi'))
+
+group_x <- select(group, sample, group)
+
+diffs <- map(comparisons, ~ 
+               difference_analysis(KO, group_x, comparison = .x, add_enriched = T))
+write.xlsx(diffs, 'func.KO.diffs.xlsx')
+
+#### KO maaslin2 #### 
+KO <- read.delim('../data/fecal_KO.tsv', row.names = 1) %>% 
+  profile_filter(by_group = F, min_prevalence = .05)
+
+group_x <- select(group, sample, treatment, dpi, pig) %>% 
+  column_to_rownames('sample') %>% 
+  mutate(dpi = as.numeric(dpi))
+
+# 固定效应是是否攻毒以及时间
+# 随机效应模型是不同猪
+Maaslin2(KO, group_x, output = 'maaslin2_KO_out', analysis_method = "LM",
+         normalization = 'NONE', transform = 'LOG', correction = 'bonferroni', 
+         fixed_effects = c('treatment', 'dpi'), random_effects = c('pig'),
+         reference = 'treatment,NC', save_models = T, save_scatter = T)
+
+# infection or not
+comparisons <- list('_0dpi_wt_vs_NC' = c('wt_0dpi','NC_0dpi'),
+                    '_1dpi_wt_vs_NC' = c('wt_1dpi','NC_1dpi'),
+                    '_3dpi_wt_vs_NC' = c('wt_3dpi','NC_3dpi'),
+                    '_7dpi_wt_vs_NC' = c('wt_7dpi','NC_7dpi'),
+                    '_14dpi_wt_vs_NC' = c('wt_14dpi','NC_14dpi'))
+
+group_x <- select(group, sample, group)
+
+diffs <- map(comparisons, ~ 
+               difference_analysis(KO_lvC, group_x, comparison = .x, add_enriched = T))
+write.xlsx(diffs, 'func.KO_lvC.diffs.xlsx')
+
+#### accociation Taxa ####
+data <- taxa_trans(profile, tax, to = 'species', out_all = T, transRA = T)
+
+metadata <- read.delim('../data/fecal_metadata.txt') %>% 
+  select(sample, load) %>% 
+  arrange(match(sample, colnames(data))) %>% 
+  column_to_rownames('sample')
+
+corr <- psych::corr.test(t(data), metadata, method = "spearman")
+
+cbind(data.frame(corr$r) %>% 
+            rename(rval = load),
+          data.frame(corr$p) %>% 
+            rename(pval = load),
+          data.frame(corr$p.adj) %>% 
+            rename(padj = load)) %>% 
+  rownames_to_column('name') %>% 
+  write.xlsx('corr_species_with_viral_load.xlsx')
+
+#### accociation path2 ####
+data <- read.delim('../data/fecal_KO.tsv', row.names = 1) %>% 
+  profile_KEGG_convert(to = 'C')
+  profile_filter(by_group = F, min_prevalence = .05) %>% 
+  profile_transRA()
+
+metadata <- read.delim('../data/fecal_metadata.txt') %>% 
+  select(sample, load) %>% 
+  arrange(match(sample, scolnames(data))) %>% 
+  column_to_rownames('sample')
+
+corr <- psych::corr.test(t(data), metadata, method = "spearman")
+
+cbind(data.frame(corr$r) %>% 
+        rename(rval = load),
+      data.frame(corr$p) %>% 
+        rename(pval = load),
+      data.frame(corr$p.adj) %>% 
+        rename(padj = load)) %>% 
+  rownames_to_column('name') %>% 
+  write.xlsx('corr_path_with_viral_load.xlsx')
+
+#### accociation path ####
+data <- read.delim('../data/fecal_KO.tsv', row.names = 1) %>% 
+  profile_KEGG_convert(to = 'C', transRA = T, rownames_fmt = 'both') %>% 
+  profile_filter(by_group = F, min_prevalence = .05)
+
+metadata <- read.delim('../data/fecal_metadata.txt') %>% 
+  select(sample, load) %>% 
+  arrange(match(sample, colnames(data))) %>% 
+  column_to_rownames('sample')
+
+corr <- psych::corr.test(t(data), metadata, method = "spearman")
+
+cbind(data.frame(corr$r) %>% 
+        rename(rval = load),
+      data.frame(corr$p) %>% 
+        rename(pval = load),
+      data.frame(corr$p.adj) %>% 
+        rename(padj = load)) %>% 
+  rownames_to_column('name') %>% 
+  write.xlsx('corr_path2_with_viral_load.xlsx')
+
+
+#### β-糖苷酶与病毒载量 ####
+data <- read.delim('../data/fecal_KO.tsv', row.names = 1) %>% 
+  filter(rownames(.) %in% c('K05349', 'K05989', 'K05350'))
+
+p1 <- data['K05349',] %>% 
+  t %>% 
+  data.frame %>% 
+  rownames_to_column('sample') %>% 
+  rename(value = 2) %>% 
+  left_join(group, by = 'sample') %>% 
+  arrange(desc(value)) %>% 
+  ggboxplot('group', 'value', fill = 'group', palette = group_color, 
+            add = 'jitter',add.params = list(shape = 21, fill = 'white'), 
+            legend = 'none', title = 'K05349', x.text.angle = 90)
+
+p2 <- data['K05350',] %>%
+  t %>%
+  data.frame %>%
+  rownames_to_column('sample') %>% 
+  rename(value = 2) %>%
+  left_join(group, by = 'sample') %>% 
+  ggboxplot('group', 'value', fill = 'group', palette = group_color, 
+            add = 'jitter',add.params = list(shape = 21, fill = 'white'), 
+            legend = 'none', title = 'K05350', x.text.angle = 90)
+
+p3 <- data['K05989',] %>%
+  t %>% 
+  data.frame %>%
+  rownames_to_column('sample') %>% 
+  rename(value = 2) %>% 
+  left_join(group, by = 'sample') %>% 
+  ggboxplot('group', 'value', fill = 'group', palette = group_color, 
+            add = 'jitter',add.params = list(shape = 21, fill = 'white'), 
+            legend = 'none', title = 'K05989', x.text.angle = 90)
+
+cowplot::plot_grid(p1, p2, p3, ncol = 1)
+ggsave('flavonoids_enzyme_ab.pdf', width = 6, height = 12)
+
+# correlation
+data <- read.delim('../data/fecal_KO.tsv', row.names = 1) %>% 
+  filter(rownames(.) %in% c('K05349','K05350','K05989')) %>% 
+  t %>% 
+  data.frame %>% 
+  rownames_to_column('sample')
+
+virus <- read.delim('../data/fecal_metadata.txt') %>% 
+  select(sample, load) %>% 
+  filter(sample %in% colnames(data)) %>% 
+  arrange(match(sample, colnames(data)))
+
+# pearson
+map(c('wt', 'd2', 'NC'), \(x) 
+    map(c('K05349','K05350','K05989'), \(y) {
+      plot_data <- left_join(data, virus, by = 'sample') %>% 
+        left_join(group, by = 'sample') %>% 
+        filter(treatment == x)
+      
+      ggscatter(plot_data, y, 'load', color = 'group', palette = group_color, 
+                cor.coef = T, add = 'reg.line', legend = 'right', title = paste(x, '|', y)) +
+        theme(aspect.ratio = 1)
+      } ) %>% 
+      cowplot::plot_grid(plotlist = ., nrow = 1) ) %>% 
+  cowplot::plot_grid(plotlist = ., ncol = 1)
+ggsave('flavonoids_enzyme_pearson_corr1.pdf', width = 14, height = 12)
+
+map(c('wt', 'd2', 'NC'), \(x) 
+    map(c('K05349','K05350','K05989'), \(y) {
+      plot_data <- left_join(data, virus, by = 'sample') %>% 
+        left_join(group, by = 'sample') %>% 
+        filter(treatment == x)
+      
+      ggscatter(plot_data, y, 'load', cor.coef = T, add = 'reg.line', 
+                legend = 'right', title = paste(x, '|', y)) +
+        theme(aspect.ratio = 1)
+    } ) %>% 
+      cowplot::plot_grid(plotlist = ., nrow = 1) ) %>% 
+  cowplot::plot_grid(plotlist = ., ncol = 1)
+ggsave('flavonoids_enzyme_pearson_corr2.pdf', width = 14, height = 12)
+
+# sparman
+map(c('wt', 'd2', 'NC'), \(x) 
+    map(c('K05349','K05350','K05989'), \(y) {
+      plot_data <- left_join(data, virus, by = 'sample') %>% 
+        left_join(group, by = 'sample') %>% 
+        filter(treatment == x)
+      
+      ggscatter(plot_data, y, 'load', color = 'group', palette = group_color, 
+                cor.coef = T, add = 'reg.line', legend = 'right', title = paste(x, '|', y),
+                cor.method = 'spearman') +
+        theme(aspect.ratio = 1)
+    } ) %>% 
+      cowplot::plot_grid(plotlist = ., nrow = 1) ) %>% 
+  cowplot::plot_grid(plotlist = ., ncol = 1)
+ggsave('flavonoids_enzyme_spearman_corr1.pdf', width = 14, height = 12)
+
+map(c('wt', 'd2', 'NC'), \(x) 
+    map(c('K05349','K05350','K05989'), \(y) {
+      plot_data <- left_join(data, virus, by = 'sample') %>% 
+        left_join(group, by = 'sample') %>% 
+        filter(treatment == x)
+      
+      ggscatter(plot_data, y, 'load', cor.coef = T, add = 'reg.line', 
+                legend = 'right', title = paste(x, '|', y), cor.method = 'spearman') +
+        theme(aspect.ratio = 1)
+    } ) %>% 
+      cowplot::plot_grid(plotlist = ., nrow = 1) ) %>% 
+  cowplot::plot_grid(plotlist = ., ncol = 1)
+ggsave('flavonoids_enzyme_spearman_corr2.pdf', width = 14, height = 12)
+```

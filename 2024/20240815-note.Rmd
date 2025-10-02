@@ -1,0 +1,174 @@
+---
+title: "MBX BC Day3 Mus Colon Content"
+author: "Jinxin Meng"
+date: "2024-08-15"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## MBT difference, enrichment analysis and correlation with gene expression
+
+```{R}
+metabolite_info <- read.delim("../metabolite_info.txt")
+profile <- read.delim("../profile.txt", row.names = 1)
+group <- read.delim("../group.txt")
+
+gps <- list(
+  c("bc_0d", "pbs_0d"),
+  c("bc_3d", "pbs_3d"))
+
+gp <- gps[[2]]
+
+samples <- group %>% 
+  filter(group %in% gp) %>% 
+  pull(sample)
+profile_x <- profile %>% 
+  select(all_of(samples))
+group_x <- group %>% 
+  filter(sample %in% samples)
+
+# 监督分组以疾病-健康为例，orthoI = NA 时执行 OPLS-DA, 自动计算正交分量的数量；默认设置为0，执行的是PLS分析
+oplsda <- opls(x = data.frame(t(profile_x), check.names = F), pull(group_x, group), orthoI = NA, predI = 1)
+
+diff <- difference_analysis(profile_x, group_x, gp = gp, diff_method = "wilcox")
+
+out <- oplsda@vipVn %>%
+  data.frame(vip = .) %>% 
+  rownames_to_column(var = "cpd_id") %>% 
+  left_join(diff, ., by = c("name" = "cpd_id")) %>% 
+  mutate(enriched = ifelse(vip > 1 & log2FC > 1, gp[1], 
+                           ifelse(vip > 1 & log2FC < -1, gp[2], "none")))
+write.table(out, paste0("diff.", gp[1], "_vs_", gp[2], ".tsv"), sep = "\t", quote = F, row.names = F)
+
+table(out$enriched)
+
+bg_data <- read.delim("/database/KEGG/v20230401/cpd2path_enrichment.tsv")
+bg_data <- read.delim("/database/KEGG/v20230401/cpd2mod_enrichment.tsv")
+
+cpds <- out %>% 
+  filter(enriched == gp[1]) %>% 
+  select(cpd_id = name) %>% 
+  left_join(metabolite_info, by = "cpd_id") %>% 
+  filter(cpd_KEGG != "") %>% 
+  pull(cpd_KEGG)
+
+eKEGG <- enricher(gene = cpds, TERM2GENE = bg_data, minGSSize = 1, pvalueCutoff = 1, qvalueCutoff = 1)
+eKEGG_out <- data.frame(eKEGG@result)
+write.table(eKEGG_out, "eKEGG.bc_3d_vs_pbs_3d.up.mod.tsv", sep = "\t", quote = F, row.names = F)
+
+plot_data <- out %>% 
+  select(name, log2FC, vip, enriched) %>% 
+  mutate(enriched = factor(enriched, c("bc_3d", "none", "pbs_3d")),
+         log2FC = ifelse(log2FC > 3, 3, log2FC),
+         log2FC = ifelse(log2FC < -3, -3, log2FC)) %>% 
+  left_join(metabolite_info %>% select(1:2, cpd_class), by = c("name" = "cpd_id")) %>% 
+  mutate(label = ifelse(enriched != "none", cpd_name, ""))
+  # mutate(label = ifelse((grepl("Fatty acid", cpd_class) & enriched != "none") | cpd_name == "3-Hydroxybutyric acid", cpd_name, ""))
+
+ggscatter(plot_data, "log2FC", "vip", color = "enriched", legend = "right",
+          palette = c("#eeacec", "grey", "#21c1dc"), size = 2) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_text(aes(label = label), size = 1, fontface = "italic")
+# ggsave("diff.bc_3d_vs_pbs_3d.vol.v2.pdf", width = 5, height = 3.5)
+
+plot_data <- read.delim("eKEGG.bc_3d_vs_pbs_3d.up.for_plot.tsv") %>% 
+  dplyr::select(all_of(c("Description","GeneRatio","pvalue"))) %>% 
+  mutate(GeneRatio = as.numeric(stringr::str_split_i(GeneRatio, "/", 1))/
+           as.numeric(stringr::str_split_i(GeneRatio, "/", 2))) %>% 
+  arrange(desc(GeneRatio)) %>% 
+  filter(pvalue < 0.05) %>% 
+  mutate(Description = factor(Description, rev(Description)))
+
+ggscatter(plot_data, "GeneRatio", "Description", fill = "pvalue", shape = 21, size = 4, 
+          x.text.angle = 90, legend = "right") +
+  scale_fill_viridis_c(direction = -1, begin = .3, end = 1)
+ggsave("diff.bc_3d_vs_pbs_3d.eKEGG.pdf", width = 8, height = 5)
+
+plot_data <- read.delim("eKEGG.bc_3d_vs_pbs_3d.up.for_plot.tsv") %>% 
+  dplyr::select(all_of(c("Description","GeneRatio","pvalue"))) %>% 
+  mutate(GeneRatio = as.numeric(stringr::str_split_i(GeneRatio, "/", 1))/
+           as.numeric(stringr::str_split_i(GeneRatio, "/", 2))) %>% 
+  arrange(desc(GeneRatio)) %>% 
+  filter(pvalue < 0.05) %>% 
+  mutate(Description = factor(Description, (Description)))
+
+plot_data <- read.delim("eKEGG.bc_3d_vs_pbs_3d.up.mod.for_plot.tsv") %>% 
+  dplyr::select(all_of(c("Description","GeneRatio","pvalue"))) %>% 
+  mutate(GeneRatio = as.numeric(stringr::str_split_i(GeneRatio, "/", 1))/
+           as.numeric(stringr::str_split_i(GeneRatio, "/", 2))) %>% 
+  arrange(desc(GeneRatio)) %>% 
+  filter(pvalue < 0.05) %>% 
+  mutate(Description = factor(Description, rev(Description)))
+
+ggbarplot(plot_data, "Description", "pvalue", fill = "pvalue", rotate = T, width = .6) +
+  scale_fill_gradient(low = "#abd9e9", high = "#fdae61")
+ggsave("eKEGG.bc_3d_vs_pbs_3d.up.mod.for_plot.pdf", width = 10, height = 6)
+```
+
+## corr analysis
+
+```{R}
+# PPAR genes & fatty acids
+samples <- c("Pbs.1d.5","Pbs.1d.1","Pbs.1d.3",
+             "BC.1d.1","BC.1d.3","BC.1d.4")
+
+diff <- read.delim("../analysis_RNAseq/20240806_analysis_v4/day1.diff.tsv") %>% 
+  filter(pvalue < 0.05 & abs(log2FoldChange) > 1)
+
+PPAR_genes <- read.delim("../analysis_RNAseq/PPAR_genes.txt")
+fpkm_genes <- read.delim("../analysis_RNAseq/fpkm.txt", row.names = 1) %>% 
+  select(all_of(samples)) %>% 
+  filter(rownames(.) %in% PPAR_genes$symbol) %>% 
+  filter(colSums(apply(., 1, \(x) x > 10)) == 6)
+
+fatty_acids <- read.delim("metabolite_info.txt") %>% 
+  filter(grepl("Fatty acid", cpd_class)) %>% 
+  pull(1)
+
+ab_metabolites <- read.delim("profile.txt", row.names = 1) %>% 
+  filter(rownames(.) %in% fatty_acids) %>% 
+  select(contains("3d"), -bc_3d_6, -pbs_3d_4)
+
+source("/code/R_func/corr_process.R")
+cor_obj <- psych::corr.test(t(fpkm_genes), t(ab_metabolites), method = "spearman")
+cor_out <- corr_merge(cor_obj$r, cor_obj$p, rho = .5, pval = .05)
+
+metabolite_metabolite_info <- read.delim("metabolite_info.txt")
+
+edges <- cor_out %>% 
+  rownames_to_column("gene") %>% 
+  gather(key = "cpd_id", value = "rval", -gene) %>% 
+  filter(rval != 0) %>% 
+  mutate(metabolite = metabolite_metabolite_info$cpd_name[match(cpd_id, metabolite_metabolite_info$cpd_id)]) %>% 
+  select(from = gene, to = metabolite, rval)
+write.table(edges, "nwk.edges.tsv", sep = "\t", quote = F, row.names = F)
+
+edges <- read.delim("nwk.edges.tsv")
+nodes <- read.delim("nwk.nodes.tsv")
+
+pacman::p_load(igraph, ggraph, tidygraph)
+
+graph <- tbl_graph(nodes = nodes, edges = edges)
+
+ggraph(graph, layout = "linear", circular = T) + 
+  geom_edge_arc(aes(color = factor(dir, levels = c("pos", "neg"))), width = .4, ) +
+  scale_edge_color_manual(values = c("#f1a340", "#998ec3")) +
+  geom_node_point(aes(shape = type, fill = factor(enriched, c("bc", "none", "pbs"))), 
+                  color = "#000000", size = 1.7, show.legend = F, stroke = .2) +
+  geom_node_text(aes(x = x*1.03, y = y*1.03, label = node, angle = atan(y/x)*360/(2*pi), 
+                     hjust = "outward", color = type), size = 1.2) +
+  scale_color_manual(values = c("#f1a340", "#998ec3")) +
+  scale_fill_manual(values = c("#f1a340", "grey", "#998ec3")) +
+  scale_shape_manual(values = c(21, 24)) +
+  labs(color = "enriched", edge_color = "enriched") +
+  coord_fixed() +
+  theme_graph()
+ggsave("nwk.pdf", width = 6, height = 5)
+```

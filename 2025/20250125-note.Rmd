@@ -1,0 +1,300 @@
+---
+title: "MGX WGS norovirus Homo in public datasets"
+author: "Jinxin Meng"
+date: "2025-01-25"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## profiling
+
+```{bash}
+cat sample_name | parallel -j 10 run_dwn_sra.sh {} .
+
+cat CannonJL_2022.PRJNA853174.sample_name | parallel -j 3 run_fastp_rmhost.sh CannonJL_2022.PRJNA853174/{}_1.fastq.gz,CannonJL_2022.PRJNA853174/{}_2.fastq.gz human CannonJL_2022.PRJNA853174/{}
+cat PatinNV_2020.PRJNA645402.sample_name | parallel -j 3 run_fastp_rmhost.sh PatinNV_2020.PRJNA645402/{}_1.fastq.gz,PatinNV_2020.PRJNA645402/{}_2.fastq.gz human PatinNV_2020.PRJNA645402/{} &
+
+cat CannonJL_2022.PRJNA853174.filepath | parallel -j 3 --colsep="\t" echo run_metaphlan.sh {2} CannonJL_2022.PRJNA853174.mpa4/{1} > r2.mpa.sh
+cat PatinNV_2020.PRJNA645402.filepath | parallel -j 3 --colsep="\t" echo run_metaphlan.sh {2} PatinNV_2020.PRJNA645402.mpa4/{1} >> r2.mpa.sh
+
+combine_file_zy_folder_allsample.py -D CannonJL_2022.PRJNA853174.mpa4/ -suffix .tsv -n 1 -v 3 --skip 5 -o CannonJL_2022.PRJNA853174.mpa4.tsv
+parse_mpa.py -i CannonJL_2022.PRJNA853174.mpa4.tsv -o CannonJL_2022.PRJNA853174.mpa4 -l p,f,g,s --short
+parse_mpa.py -i CannonJL_2022.PRJNA853174.mpa4.tsv -o CannonJL_2022.PRJNA853174.mpa4 --taxa --add_header --split
+
+combine_file_zy_folder_allsample.py -D PatinNV_2020.PRJNA645402.mpa4 -suffix .tsv -n 1 -v 3 --skip 5 -o PatinNV_2020.PRJNA645402.mpa4.tsv
+parse_mpa.py -i PatinNV_2020.PRJNA645402.mpa4.tsv -o PatinNV_2020.PRJNA645402.mpa4 -l p,f,g,s --short
+parse_mpa.py -i PatinNV_2020.PRJNA645402.mpa4.tsv -o PatinNV_2020.PRJNA645402.mpa4 --taxa --add_header --split
+
+cat run_metaphlan.sh
+#!/usr/bin/bash
+
+if [ $# -lt 2 ] || [[ $1 =~ "-h" ]];then
+    echo "$0 <fq>|<fq1,fq2> <out_prefix> [nreads:999999999]"
+    echo "  MetaPhlAn version 4.0.6 (1 Mar 2023)"
+    echo "  Database in: /share/data1/database/mpa4/mpa_vOct22_CHOCOPhlAnSGB_202212"
+    exit 127
+fi
+
+set -f
+set -e # 如果出错，就不再执行下一步
+
+fq=$1; out_f=$2; nreads=${3:-999999999}
+
+db_path=/share/data1/database/mpa4/mpa_vOct22_CHOCOPhlAnSGB_202212
+bowtie2=/share/data1/software/miniconda3/envs/metaphlan/bin/bowtie2
+metaphlan=/share/data1/software/miniconda3/envs/metaphlan/bin/metaphlan
+
+if [[ $fq =~ "," ]];then
+    fq1=$(echo $fq | cut -d "," -f1)
+    fq2=$(echo $fq | cut -d "," -f2)
+    $bowtie2 --end-to-end --mm --fast -p 10 -x $db_path -u $nreads --sam-no-hd --sam-no-sq --no-unal -1 $fq1 -2 $fq2 -S $out_f.sam 2> $out_f.bowtie.log && \
+        $metaphlan $out_f.sam --input_type sam --nreads $nreads -o $out_f.tsv --bowtie2db /share/data1/database/mpa4/ -x mpa_vOct22_CHOCOPhlAnSGB_202212 && \
+        rm $out_f.sam
+else
+    $bowtie2 --end-to-end --mm --fast -p 10 -x $db_path -u $nreads --sam-no-hd --sam-no-sq --no-unal -U $fq -S $out_f.sam 2> $out_f.bowtie.log && \
+        $metaphlan $out_f.sam --input_type sam --nreads $nreads -o $out_f.tsv --bowtie2db /share/data1/database/mpa4/ -x mpa_vOct22_CHOCOPhlAnSGB_202212 && \
+        rm $out_f.sam
+fi
+
+
+cat run_fastp_rmhost.sh
+#!/usr/bin/bash
+shopt -s expand_aliases
+
+if [ $# -ne 3 ];then
+    echo -e "Usage: $0 [fq|fq1,fq2] [host] [out_prefix]\e[0m"
+    echo -e " \033[31mOptional host:\033[0m:"
+    printf "%16s:    %-20s %-20s\n" human Homo_sapiens GCF_000001405.40_GRCh38
+    printf "%16s:    %-20s %-20s\n" pig Sus_scrofa GCA_000003025.6
+    printf "%16s:    %-20s %-20s\n" chicken Gallus_gallus GCF_016699485.2
+    exit 2
+fi
+
+fq=$1; host=$2; out=$3; trds=12
+alias fastp="/share/data1/software/binary/fastp"
+alias bowtie2="/share/data1/software/bowtie2-2.5.4/bowtie2"
+
+#index
+declare -A host_index
+host_index["human"]="/share/data1/database/genome_host/Homo_sapiens_human/Homo_sapiens_human"
+host_index["pig"]="/share/data1/database/genome_host/Sus_scrofa_pig/Sus_scrofa_pig"
+host_index["chicken"]="/share/data1/database/genome_host/Gallus_gallus_chicken/Gallus_gallus_chicken"
+index=${host_index["${host}"]}
+
+( [ -f ${out}_map2host.log ] && grep -q 'overall' ${out}_map2host.log ) &&\
+    echo -e "[$(date +%Y-%m-%d\ %H:%M:%S)] Skip sample: $out." && exit 0
+
+if [[ ${fq} =~ "," ]];then
+    fq1=$(echo $fq | cut -d "," -f1)
+    fq2=$(echo $fq | cut -d "," -f2)
+    fastp -w $trds -q 20 -u 30 -n 5 -y -Y 30 -l 80 --trim_poly_g \
+        -i $fq1 -I $fq2 -o ${out}_clean_1.fq.gz -O ${out}_clean_2.fq.gz -h /dev/null -j /dev/null 1>${out}_fastp.log 2>&1
+    bowtie2 --end-to-end --mm --fast -p $trds -x $index --no-head -1 ${out}_clean_1.fq.gz -2 ${out}_clean_2.fq.gz 2> ${out}_map2host.log |\
+        perl -ne 'chomp;@s=split /\s+/;if($s[1]==77){print "\@$s[0]/1\n$s[9]\n+\n$s[10]\n";}elsif($s[1]==141){print STDERR "\@$s[0]/2\n$s[9]\n+\n$s[10]\n";}' \
+        > >(pigz> ${out}_rmhost_1.fq.gz) 2> >(pigz > ${out}_rmhost_2.fq.gz)
+    chmod 444 ${out}_fastp.log ${out}_map2host.log ${out}_rmhost_1.fq.gz ${out}_rmhost_2.fq.gz
+    rm ${out}_clean_1.fq.gz ${out}_clean_2.fq.gz
+else
+    fastp -w $trds -q 20 -u 30 -n 5 -y -Y 30 -l 80 --trim_poly_g \
+        -i $fq -o ${out}_clean.fq.gz -h /dev/null -j /dev/null 1>${out}_fastp.log 2>&1
+    bowtie2 --end-to-end --mm --fast -p $trds -x $index --no-head -U ${out}_clean.fq.gz 2> ${out}_map2host.log |\
+        perl -ne 'chomp;@s=split /\s+/;if($s[1]==4){print "\@$s[0]\n$s[9]\n+\n$s[10]\n";}' \
+        > >(pigz > ${out}_rmhost.fq.gz)
+    chmod 444 ${out}_fastp.log ${out}_map2host.log ${out}_rmhost.fq.gz
+    rm ${out}_clean.fq.gz
+fi
+```
+
+## CannonJL_2022.PRJNA853174
+
+```{R}
+#### HC vs INF first day ####
+gp <- c("SI", "HC")
+gp_col <- structure(c('#eeacec', '#21c1dc'), names = gp)
+
+# mapping rate
+group <- read.delim("sample_group.txt") %>% 
+  filter(sra %in% c('SRR19881286','SRR19881285','SRR19881301','SRR19881300','SRR19881293','SRR19881292')) %>% 
+  select(sample = sra, group) %>% 
+  mutate(group = factor(group, gp))
+
+data <- read.delim("../mpa4/CannonJL_2022.PRJNA853174.map_rate.tsv") %>% 
+  filter(sample %in% group$sample) %>% 
+  mutate(value = as.numeric(gsub("%", "", map))) %>% 
+  left_join(group, "sample")
+
+aggregate(value ~ group, data, mean)
+aggregate(value ~ group, data, sd)
+
+ggboxplot(data, "group", "value", fill = "group", palette = gp_col, legend = "none", 
+          xlab = "", ylab = "Reads mapping rate (%)", outlier.size = 1) +
+  stat_compare_means(comparisons = list(gp), label = "p.signif", method = 'wilcox') +
+  theme(aspect.ratio = 1.5)
+ggsave("mapping_rate.pdf", width = 3, height = 4)
+
+# div
+source("F:/code/R_func/diversity.R")
+
+profile <- read.delim("../mpa4/CannonJL_2022.PRJNA853174.mpa4.species.tsv", row.names = 1) %>% 
+  select(all_of(group$sample)) %>% 
+  profile_filter(group, min_n = 2)
+
+data <- calcu_alpha(profile, method = "shannon") %>% 
+  left_join(group, by = "sample")
+
+ggboxplot(data, "group", "value", fill = "group", palette = gp_col, legend = "none", 
+          xlab = "", ylab = "Shannon Index", outlier.size = 1) +
+  stat_compare_means(comparisons = list(gp), label = "p.signif") +
+  theme(aspect.ratio = 1.5)
+ggsave("div.shannon.pdf", width = 3, height = 4)
+
+# beta div
+source("F:/code/R_func/plot_PCoA.R")
+
+betadisper <- calcu_betadisper(profile, group, dis_method = "bray", group_order = gp, group_color = gp_col)
+
+betadisper$plot +
+  ggsignif::geom_signif(xmin = c(1), xmax = c(2), annotations = "ns", y_position = 0.67) +
+  theme(aspect.ratio = 1.5)
+ggsave("div.betadisper.pdf", width = 3, height = 4)
+
+plot_PCoA(profile, group, group_order = gp, group_color = gp_col, dis_method = "bray", 
+          display_type = "line")
+ggsave("div.PCoA.pdf", width = 5, height = 4)
+
+# diff & volcano
+diff <- difference_analysis(profile, group, gp = gp)
+write.table(diff, "diff.species.tsv", sep = "\t", quote = F, row.names = F)
+
+# abundance heatmap
+library(ComplexHeatmap)
+data <- profile %>% 
+  select(all_of(arrange(group, group) %>% pull(sample)))
+taxa <- read.delim("../mpa4/CannonJL_2022.PRJNA853174.mpa4.taxa") %>% 
+  select(species, family) %>% 
+  distinct()
+
+col_data <- data.frame(name = colnames(data)) %>% 
+  left_join(group, by = c('name' = 'sample'))
+row_data <- data.frame(name = rownames(data)) %>% 
+  left_join(taxa, by = c('name' = 'species')) %>% 
+  mutate(family = forcats::fct_lump_n(family, 11, other_level = 'f__Other', ties.method = 'first'))
+
+col_annotation <- column_to_rownames(col_data, 'name')
+row_annotation <- column_to_rownames(row_data, 'name')
+family_col <- structure(RColorBrewer::brewer.pal(n = 12, name = 'Set3'), names = levels(row_data$family))
+annotation_col <- list(group = gp_col, family = family_col)
+
+col_split <- factor(col_data$group)
+row_split <- factor(row_data$family)
+
+pheatmap(data, scale = 'row', border_gp = gpar(col = "black"),
+         color = c("#2e84c8", "#ffffff", "#f64b9f"),
+         border_color = "white",
+         show_row_dend = F, show_column_dend = F,
+         annotation_row = row_annotation, annotation_col = col_annotation,
+         annotation_colors = annotation_col, 
+         cellwidth = 8, cellheight = 8,
+         fontsize_row = 6, fontsize_col = 6, 
+         row_split = row_split, column_split = col_split,
+         row_title_rot = 0)
+```
+
+## PatinNV_2020.PRJNA645402
+```{R}
+#### HC vs INF first day ####
+gp <- c("INF", "HC")
+gp_col <- structure(c('#eeacec', '#21c1dc'), names = gp)
+
+# mapping rate
+group <- read.delim("sample_group.txt") %>% 
+  filter(start != '' | group == 'HC') %>% 
+  select(sample = sra, group) %>% 
+  mutate(group = factor(group, gp))
+
+data <- read.delim("../mpa4/PatinNV_2020.PRJNA645402.map_rate.tsv") %>% 
+  filter(sample %in% group$sample) %>% 
+  mutate(value = as.numeric(gsub("%", "", map))) %>% 
+  left_join(group, "sample")
+
+aggregate(value ~ group, data, mean)
+aggregate(value ~ group, data, sd)
+
+ggboxplot(data, "group", "value", fill = "group", palette = gp_col, legend = "none", 
+          xlab = "", ylab = "Reads mapping rate (%)", outlier.size = 1) +
+  stat_compare_means(comparisons = list(gp), label = "p.signif") +
+  theme(aspect.ratio = 1.5)
+ggsave("mapping_rate.pdf", width = 3, height = 4)
+
+# div
+source("F:/code/R_func/diversity.R")
+
+profile <- read.delim("../mpa4/PatinNV_2020.PRJNA645402.mpa4.species.tsv", row.names = 1) %>% 
+  select(all_of(group$sample)) %>% 
+  profile_filter(group, by_group = T, all_group = T, min_n = 3)
+
+data <- calcu_alpha(profile, method = "richness") %>% 
+  left_join(group, by = "sample")
+
+ggboxplot(data, "group", "value", fill = "group", palette = gp_col, legend = "none", 
+          xlab = "", ylab = "Richness Index", outlier.size = 1) +
+  stat_compare_means(comparisons = list(gp), label = "p.signif") +
+  theme(aspect.ratio = 1.5)
+ggsave("div.richness.pdf", width = 3, height = 4)
+
+# beta div
+source("F:/code/R_func/plot_PCoA.R")
+
+betadisper <- calcu_betadisper(profile, group, dis_method = "bray", group_order = gp, group_color = gp_col)
+
+betadisper$plot +
+  ggsignif::geom_signif(xmin = c(1), xmax = c(2), annotations = "ns", y_position = 0.67) +
+  theme(aspect.ratio = 1.5)
+ggsave("div.betadisper.pdf", width = 3, height = 4)
+
+plot_PCoA(profile, group, group_order = gp, group_color = gp_col, dis_method = "bray", 
+          display_type = "line")
+ggsave("div.PCoA.pdf", width = 5, height = 4)
+
+# diff & volcano
+diff <- difference_analysis(profile, group, gp = gp)
+write.table(diff, "diff.species.tsv", sep = "\t", quote = F, row.names = F)
+
+# abundance heatmap
+library(ComplexHeatmap)
+data <- profile %>% 
+  select(all_of(arrange(group, group) %>% pull(sample)))
+taxa <- read.delim("../mpa4/PatinNV_2020.PRJNA645402.mpa4.taxa") %>% 
+  select(species, family) %>% 
+  distinct()
+
+col_data <- data.frame(name = colnames(data)) %>% 
+  left_join(group, by = c('name' = 'sample'))
+row_data <- data.frame(name = rownames(data)) %>% 
+  left_join(taxa, by = c('name' = 'species')) %>% 
+  mutate(family = forcats::fct_lump_n(family, 11, other_level = 'f__Other', ties.method = 'first'))
+
+col_annotation <- column_to_rownames(col_data, 'name')
+row_annotation <- column_to_rownames(row_data, 'name')
+family_col <- structure(RColorBrewer::brewer.pal(n = 12, name = 'Set3'), names = levels(row_data$family))
+annotation_col <- list(group = gp_col, family = family_col)
+
+col_split <- factor(col_data$group)
+row_split <- factor(row_data$family)
+
+pheatmap(data, scale = 'row', border_gp = gpar(col = "black"),
+         color = c("#2e84c8", "#ffffff", "#f64b9f"),
+         show_row_dend = F, show_column_dend = F,
+         annotation_row = row_annotation, annotation_col = col_annotation,
+         annotation_colors = annotation_col, 
+         cellwidth = 10, cellheight = 4,
+         fontsize_row = 3, fontsize_col = 4, 
+         row_split = row_split, column_split = col_split,
+         row_title_rot = 0)
+```

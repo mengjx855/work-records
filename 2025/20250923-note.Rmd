@@ -1,0 +1,138 @@
+---
+title: "Lipidome SFTS Mus Liver LiJL"
+author: "Jinxin Meng"
+date: "2025-09-23"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## Lipidome analysis
+
+```{R}
+#### info ####
+profile <- read.xlsx('data.xlsx', sheet = 'profile') %>% 
+  dplyr::select(!contains('QC')) %>% 
+  column_to_rownames('Metabolite_ID')
+group <- read.xlsx('data.xlsx', sheet = 'group')
+info <- read.xlsx('data.xlsx', sheet = 'info')
+
+group_level <- c('SFTS_3dpi','SFTS_4dpi','SFTS_5dpi','SFTS_6dpi','SFTS_8dpi','mock')
+group_color <- structure(c('#197ec0','#4dbbd5','#00a087', '#91d1c2','#d5e4a2','#bab0ac'), 
+                         names = group_level)
+
+#### PCA ####
+source('/data/mengjx/R_proj/R_func/plot_PCA.R')
+plot_PCA(log10(profile), group, add_group = T, group_color = group_color,
+         lab_size = 4, aspect_ratio = 4/5)
+ggsave('PCA.pdf', width = 5, height = 4)
+
+#### difference Category ####
+source('/data/mengjx/R_proj/R_func/calcu_difference.R')
+
+class_prof <- mutate(
+  profile, class = info$Category[match(rownames(profile), info$Metabolite_ID)]) %>% 
+  aggregate(. ~ class, ., sum) %>% 
+  column_to_rownames('class')
+  
+plot_data <- data.frame(t(class_prof), check.names = F) %>%
+  rownames_to_column('sample') %>% 
+  left_join(dplyr::select(group, sample, group, dpi), by = 'sample') %>% 
+  arrange(dpi)
+
+plots <- map(rownames(class_prof), ~ {
+  .data <- dplyr::select(plot_data, group, dpi, value = all_of(.x))
+  .test <- calcu_diff(.data, value ~ dpi) %>% 
+    filter(pval < 0.05) %>% pull(comparison) %>% strsplit('_vs_')
+  .text <- dplyr::select(.data, group, dpi) %>% distinct() %>% pull(group, name = dpi)
+  
+  ggboxplot(.data, 'dpi', 'value', fill = 'group', palette = group_color,
+            xlab = '', ylab = 'Abundance', legend = 'none', title = .x, 
+            add = 'jitter', add.params = list(shape = 21, size = 3)) +
+    geom_smooth(aes(group = 1), alpha = .2, linewidth = 1) +
+    geom_signif(comparisons = .test, step_increase = .05, map_signif_level = T, 
+                vjust = .8, textsize = 5) +
+    scale_y_continuous(labels = scales::scientific) +
+    scale_x_discrete(labels = .text) +
+    theme(aspect.ratio = .9,
+          axis.ticks.length = unit(2, 'mm'),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          plot.title = element_text(face = 'bold', hjust = .5),
+          plot.subtitle = element_text(face = 'bold', hjust = .5)) } )
+
+cowplot::plot_grid(plotlist = plots, nrow = 2, align = 'v')
+ggsave('difference_Category.pdf', width = 18, height = 9)
+
+#### difference Main_Class ####
+class_prof <- mutate(
+  profile, class = info$Main_Class[match(rownames(profile), info$Metabolite_ID)]) %>% 
+  aggregate(. ~ class, ., sum) %>% 
+  column_to_rownames('class')
+
+plot_data <- data.frame(t(class_prof), check.names = F) %>%
+  rownames_to_column('sample') %>% 
+  left_join(dplyr::select(group, sample, group, dpi), by = 'sample') %>% 
+  arrange(dpi)
+
+plots <- map(rownames(class_prof), ~ {
+  .data <- dplyr::select(plot_data, group, dpi, value = all_of(.x))
+  .test <- calcu_diff(.data, value ~ dpi) %>% 
+    filter(pval < 0.05) %>% pull(comparison) %>% strsplit('_vs_')
+  .text <- dplyr::select(.data, group, dpi) %>% distinct() %>% pull(group, name = dpi)
+  
+  ggboxplot(.data, 'dpi', 'value', fill = 'group', palette = group_color,
+            xlab = '', ylab = 'Abundance', legend = 'none', title = .x, 
+            add = 'jitter', add.params = list(shape = 21, size = 3)) +
+    geom_smooth(aes(group = 1), alpha = .2, linewidth = 1) +
+    geom_signif(comparisons = .test, step_increase = .05, map_signif_level = T, 
+                vjust = .8, textsize = 5) +
+    scale_y_continuous(labels = scales::scientific) +
+    scale_x_discrete(labels = .text) +
+    theme(aspect.ratio = .9,
+          axis.ticks.length = unit(2, 'mm'),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          plot.title = element_text(face = 'bold', hjust = .5),
+          plot.subtitle = element_text(face = 'bold', hjust = .5)) } )
+
+cowplot::plot_grid(plotlist = plots, nrow = 4, align = 'v')
+ggsave('difference_Main_Class.pdf', width = 22, height = 18)
+
+#### difference Sub_Class ####
+class_prof <- mutate(
+  profile, class = info$Sub_Class[match(rownames(profile), info$Metabolite_ID)]) %>% 
+  aggregate(. ~ class, ., sum) %>% 
+  column_to_rownames('class')
+
+plot_data <- data.frame(t(class_prof), check.names = F) %>%
+  rownames_to_column('sample') %>% 
+  left_join(dplyr::select(group, sample, group, dpi), by = 'sample') %>% 
+  arrange(dpi)
+
+plots <- map(rownames(class_prof), ~ {
+  .data <- dplyr::select(plot_data, group, dpi, value = all_of(.x))
+  .test <- calcu_diff(.data, value ~ dpi) %>% 
+    filter(pval < 0.05) %>% pull(comparison) %>% strsplit('_vs_')
+  .text <- dplyr::select(.data, group, dpi) %>% distinct() %>% pull(group, name = dpi)
+  
+  ggboxplot(.data, 'dpi', 'value', fill = 'group', palette = group_color,
+            xlab = '', ylab = 'Abundance', legend = 'none', title = .x, 
+            add = 'jitter', add.params = list(shape = 21, size = 3)) +
+    geom_smooth(aes(group = 1), alpha = .2, linewidth = 1) +
+    geom_signif(comparisons = .test, step_increase = .05, map_signif_level = T, 
+                vjust = .8, textsize = 5) +
+    scale_y_continuous(labels = scales::scientific) +
+    scale_x_discrete(labels = .text) +
+    theme(aspect.ratio = .9,
+          axis.ticks.length = unit(2, 'mm'),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          plot.title = element_text(face = 'bold', hjust = .5),
+          plot.subtitle = element_text(face = 'bold', hjust = .5)) } )
+
+cowplot::plot_grid(plotlist = plots, nrow = 8, align = 'v')
+ggsave('difference_Sub_Class.pdf', width = 18, height = 36)
+```

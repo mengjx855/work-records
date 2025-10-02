@@ -1,0 +1,224 @@
+---
+title: "RNASeq PLA treat Mus organoid"
+author: "Jinxin Meng"
+date: "2024-12-15"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## PLA Mus RNASeq 
+
+```{R}
+#### info ####
+group_level <- c('PLA', 'MOCK')
+group_color <- structure(c('#e43589','#307cc0'), names = group_level)
+
+profile_rc <- read.delim('../data/profile_rc.txt', row.names = 1, check.names = F)
+profile_rc <- profile_rc[rowSums(profile_rc > 3) > 2, ]
+
+group <- read.delim('../data/group.txt') %>% 
+  mutate(group = factor(group, c('PLA', 'MOCK')))
+
+#### diff ####
+metadata <- column_to_rownames(group, 'sample')
+
+dds <- DESeqDataSetFromMatrix(countData = profile_rc, colData = metadata, design = ~ group)
+dds <- DESeq(dds)
+
+diff <- results(dds, contrast = c('group', group_level)) %>% 
+  data.frame(.) %>% 
+  rownames_to_column(var = 'name') %>% 
+  mutate(enriched = ifelse(log2FoldChange > 0 & pvalue < 0.05, group_level[1], 
+                           ifelse(log2FoldChange < 0 & pvalue < 0.05, group_level[2], 'none')))
+write.xlsx(diff, 'diff.xlsx')
+
+#### ORA 富集分析 GO ####
+gene_info <- AnnotationDbi::select(org.Mm.eg.db, diff$name, 
+                                   keytype = 'SYMBOL', columns = c('ENTREZID'))
+
+eGO <- map(list(group_level, group_level[1], group_level[2]), \(x)
+    filter(diff, enriched %in% x) %>% 
+      left_join(gene_info, by = c('name' = 'SYMBOL')) %>% 
+      pull(ENTREZID) %>% 
+      na.omit() %>% 
+      enrichGO(OrgDb = 'org.Mm.eg.db', ont = 'ALL', pvalueCutoff = 1, qvalueCutoff = 1) %>% 
+      data.frame() %>% 
+      mutate(geneName = lapply((strsplit(x = geneID, '/')), \(x) 
+                               gene_info$SYMBOL[match(x, gene_info$ENTREZID)]) %>% 
+               sapply(\(x) paste(x, collapse = '/')), .after = geneID, 
+             Description = stringr::str_replace(Description, ' - Mus.*$', '')) ) %>% 
+  set_names(c('full', group_level[1], group_level[2]))
+write.xlsx(eGO, 'eGO.xlsx')
+
+#### ORA 富集分析 KEGG ####
+gene_info <- AnnotationDbi::select(org.Mm.eg.db, diff$name, 
+                                   keytype = 'SYMBOL', columns = c('ENTREZID'))
+
+eKEGG <- map(list(group_level, group_level[1], group_level[2]), \(x)
+    filter(diff, enriched %in% x) %>% 
+      left_join(gene_info, by = c('name' = 'SYMBOL')) %>% 
+      pull(ENTREZID) %>% 
+      na.omit() %>% 
+      enrichKEGG(organism = 'mmu', pvalueCutoff = 1, qvalueCutoff = 1) ) %>% 
+  set_names(c('full', group_level[1], group_level[2]))
+
+eKEGG_out <- map(eKEGG, ~ data.frame(.x) %>%
+                   mutate(geneName = lapply((strsplit(x = geneID, '/')), \(x)
+                                            gene_info$SYMBOL[match(x, gene_info$ENTREZID)]) %>% 
+                            sapply(\(x) paste(x, collapse = '/')), .after = geneID, 
+                          Description = stringr::str_replace(Description, ' - Mus.*$', '')) )
+write.xlsx(eKEGG_out, 'eKEGG.xlsx')
+
+eKEGG[[2]] %>% 
+  mutate(Description = stringr::str_replace(Description, ' - Mus.*$', '')) %>% 
+  enrichplot::pairwise_termsim() %>% 
+  emapplot(shadowtext = F, cex_label_category = .4, showCategory = 50, cex_line = .4)
+ggsave('eKEGG.PLA.emapplot.pdf', width = 8, height = 6)
+
+#### GSEA 富集分析 GO ####
+library(BiocParallel)
+library(enrichplot)
+register(SerialParam())
+
+left_join(diff, gene_info, by = c('name' = 'SYMBOL')) %>%
+  filter(!is.na(ENTREZID)) %>% 
+  pull(log2FoldChange, name = ENTREZID) %>%
+  sort(decreasing = T) %>% 
+  gseGO(OrgDb = 'org.Mm.eg.db', pvalueCutoff = 1, ont = 'ALL') %>% 
+  data.frame() %>% 
+  write.xlsx('gseGO.xlsx')
+
+#### GSEA 富集分析 KEGG ####
+library(BiocParallel)
+library(enrichplot)
+register(SerialParam())
+
+left_join(diff, gene_info, by = c('name' = 'SYMBOL')) %>%
+  filter(!is.na(ENTREZID)) %>% 
+  pull(log2FoldChange, name = ENTREZID) %>%
+  sort(decreasing = T) %>% 
+  gseKEGG(organism = 'mmu', pvalueCutoff = 1) %>% 
+  data.frame() %>% 
+  write.xlsx('gseKEGG.xlsx')
+
+#### GSEA 富集分析 custom paths ####
+lib <- read.delim('../data/path_library.tsv')
+gsea <- structure(diff$log2FoldChange, names = diff$name) %>%
+  sort(decreasing = T) %>% 
+  GSEA(TERM2GENE = lib, pvalueCutoff = 1, maxGSSize = 1000, minGSSize = 10)
+openxlsx::write.xlsx(gsea@result, 'gsea.paths.xlsx')
+
+map(unique(lib$term), \(x) 
+  gseaplot(gsea, geneSetID = x, , by = 'runningScore', color.line = '#66c2a5', color.vline = 'red',
+           title = paste0(x, ', NES:', round(gsea[x]$NES, 3), ', P:', round(gsea[x]$pvalue, 3))) + 
+    scale_x_continuous(expand = c(.01, .01)) +
+    theme(panel.grid = element_blank(), aspect.ratio = 2/3)) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', nrow = 4)
+ggsave('gsea.paths.pdf', width = 13.5, height = 12)
+
+# 核心富集基因的表达倍数变化的分布情况
+ridgeplot(gsea, fill = 'pvalue', orderBy = 'NES', decreasing = F, label_format = 100) +
+  theme_pubr() +
+  theme(aspect.ratio = 3/2) +
+  guides(fill = guide_colorbar(position = 'right'))
+ggsave('gsea.paths2.pdf', width = 7, height = 5)
+
+#### GSEA 富集分析 custom cells ####
+lib <- read.delim('../data/cell_library.txt')
+gsea <- structure(diff$log2FoldChange, names = diff$name) %>%
+  sort(decreasing = T) %>% 
+  GSEA(TERM2GENE = lib, pvalueCutoff = 1, maxGSSize = 1000, minGSSize = 10)
+openxlsx::write.xlsx(gsea@result, 'gsea.cells.xlsx')
+
+map(unique(lib$term), \(x) 
+    gseaplot(gsea, geneSetID = x, , by = 'runningScore', color.line = '#66c2a5', color.vline = 'red',
+             title = paste0(x, ', NES:', round(gsea[x]$NES, 3), ', P:', round(gsea[x]$pvalue, 3))) + 
+      scale_x_continuous(expand = c(.01, .01)) +
+      theme(panel.grid = element_blank(), aspect.ratio = 2/3)) %>% 
+  cowplot::plot_grid(plotlist = ., align = 'v', ncol = 3)
+ggsave('gsea.cells.pdf', width = 13.5, height = 6)
+
+# 核心富集基因的表达倍数变化的分布情况
+ridgeplot(gsea, fill = 'pvalue', orderBy = 'NES', decreasing = F, label_format = 100) +
+  theme_pubr() +
+  theme(aspect.ratio = 2) +
+  guides(fill = guide_colorbar(position = 'right'))
+ggsave('gsea.cells2.pdf', width = 5, height = 4)
+
+#### 几个通路的热图 ####
+library(ComplexHeatmap)
+
+# Wnt_signaling_pathway
+# Cell_cycle
+# Notch_signaling_pathway
+
+lib <- read.delim('../data/path_library.tsv') %>% 
+  filter(term %in% c('Wnt_signaling_pathway'))
+
+diff <- read.delim('diff.tsv') %>% 
+  filter(pvalue < 0.05)
+
+data <- read.delim('../data/profile_tpm.txt', row.names = 1) %>% 
+  filter(rownames(.) %in% lib$gene & rownames(.) %in% diff$name)
+
+col_annotation <- read.delim('../data/group.txt', row.names = 1) %>% 
+  mutate(group = factor(group, c('MOCK', 'PLA')))
+col_split <- col_annotation$group
+
+pdf('heatmap.wnt.all.pdf', width = 5, height = 6)
+pheatmap(data, 
+         scale = 'row',
+         color = colorRampPalette(c('#307cc0', 'white', '#e43589'))(100),
+         column_split = col_split,
+         cluster_column_slices = F,
+         column_title_gp = gpar(fontsize = 8),
+         column_gap = unit(0, 'mm'),
+         show_row_dend = F, show_column_dend = F,
+         cellheight = 8, cellwidth = 16,
+         fontsize_col = 10, fontsize_row = 7,
+         border_color = 'white',
+         border_gp = gpar(col = 'black')
+)
+dev.off()
+
+#### 几个通路的热图 20250604 ####
+# mmu04216 Ferroptosis
+library(ComplexHeatmap)
+
+diff <- read.delim('diff.tsv')
+gene_info <- AnnotationDbi::select(org.Mm.eg.db, diff$name, 
+                                   keytype = 'SYMBOL', columns = c('ENTREZID'))
+
+lib <- read.delim('/database/KEGG/enrichment_analysis/mmu_gene2path_enrichment.tsv') %>% 
+  filter(grepl('Ferroptosis', pathway)) %>% 
+  mutate(ID = as.character(ID)) %>% 
+  left_join(gene_info, by = c('ID' = 'ENTREZID'))
+
+data <- read.delim('../data/profile_tpm.txt', row.names = 1) %>% 
+  filter(rownames(.) %in% lib$SYMBOL)
+
+col_annotation <- read.delim('../data/group.txt', row.names = 1) %>% 
+  mutate(group = factor(group, c('MOCK', 'PLA')))
+col_split <- col_annotation$group
+
+pdf('heatmap.Ferroptosis.pdf', width = 5, height = 6)
+pheatmap(data, 
+         scale = 'row',
+         color = colorRampPalette(c('#307cc0', 'white', '#e43589'))(100),
+         column_split = col_split,
+         cluster_column_slices = F,
+         column_title_gp = gpar(fontsize = 8),
+         column_gap = unit(0, 'mm'),
+         show_row_dend = F, show_column_dend = F,
+         cellheight = 8, cellwidth = 16,
+         fontsize_col = 10, fontsize_row = 7,
+         border_color = 'white',
+         border_gp = gpar(col = 'black') )
+dev.off()
+```

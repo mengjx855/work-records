@@ -1,0 +1,437 @@
+---
+title: "STFSV infection THP1 RNASeq"
+author: "Jinxin Meng"
+date: "2024-11-25"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## STFSV infection THP1 RNASeq 
+
+```{R}
+#### data ####
+gp_col <- c('mock' = '#8da0cb', 'ATRA' = '#66c2a5', 'SFTSV' = '#fc8d62', 'ATRA_SFTSV' = '#e78ac3')
+
+group <- read.delim("../data/group.txt")
+profile <- read.delim("../data/profile.txt", row.names = 1)
+profile <- read.delim("../data/profile.txt")
+profile <- profile[rowSums(profile > 2) > 3, ]
+
+gene_info <- AnnotationDbi::select(org.Hs.eg.db, keys = rownames(profile), 
+                                   keytype = "ENSEMBL", columns = c("ENTREZID", "SYMBOL")) 
+
+gene_info <- AnnotationDbi::select(org.Hs.eg.db, keys = keys(org.Hs.eg.db), 
+                                   keytype = "ENTREZID", columns = c("SYMBOL", "ENSEMBL"))
+
+#### PCA ####
+source("/code/R_func/plot_PCA.R")
+
+plot_PCA(profile, group, group_order = names(gp_col), group_color = gp_col)
+# ggsave("PCA.pdf", width = 6, height = 4)
+
+#### fpkm ####
+source("/code/R_func/transform_rc.R")
+
+library(TxDb.Hsapiens.UCSC.hg38.knownGene) # 基因组信息
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+gene_ranges <- genes(txdb) # 基因长度获取
+gene_info <- AnnotationDbi::select(org.Hs.eg.db, keys = rownames(profile), 
+                                  keytype = "ENSEMBL", columns = c("ENTREZID", "SYMBOL")) %>% 
+  left_join(data.frame(ENTREZID = names(gene_ranges), length = width(gene_ranges)), by = "ENTREZID") %>% 
+  filter(!is.na(length))
+
+gene_length <- dplyr::select(gene_info, name = ENSEMBL, len = length) %>% 
+  group_by(name) %>% 
+  dplyr::slice_max(len, n = 1)
+
+fpkm <- rc2fpkm(profile, gene_length) %>% 
+  filter(!is.na(mock1)) %>% 
+  mutate(name = gene_info$SYMBOL[match(rownames(.), gene_info$ENSEMBL)]) %>% 
+  aggregate(. ~ name, ., mean)
+write.table(fpkm, "../data/profile_fpkm.txt", sep = "\t", quote = F, row.names = F)
+
+#### 基因表达 ####
+fpkm <- read.delim("../data/profile_fpkm.txt", row.names = 1)
+
+data <- fpkm['PPARG',] %>% 
+  t %>% 
+  data.frame() %>% 
+  dplyr::rename(value = 1) %>% 
+  rownames_to_column("sample") %>% 
+  left_join(group, by = "sample")
+
+ggboxplot(data, "group", "value", fill = "group", legend = "none", xlab = '', ylab = 'FPKM of PPARG') +
+  stat_compare_means(comparisons = list(c('mock','ATRA'), c('mock','SFTSV'), c('mock','ATRA_SFTSV'), 
+                                        c('ATRA', 'SFTSV'), c('ATRA', 'ATRA_SFTSV')), 
+                     label = "p.signif", method = "t", step.increase = .06, vjust = .8, 
+                     tip.length = .02) +
+  theme(aspect.ratio = 1)
+# ggsave("FPKM.PPARG.boxplot.pdf", width = 4, height = 4)
+
+#### 差异分析 ####
+metadata <- data.frame(row.names = colnames(profile)) %>%
+  mutate(group = group$group[match(rownames(.), group$sample)],
+         group = factor(group))
+
+dds <- DESeqDataSetFromMatrix(countData = profile, colData = metadata, design = ~ group) # 构建dds对象
+des <- DESeq(dds) # deseqs差异分析
+
+gps <- list( # 构建分组比较对, "group"是group表的第二列名称
+  c("group", "ATRA", "mock"),
+  c("group", "SFTSV", "mock"),
+  c("group", "ATRA_SFTSV", "mock"),
+  c("group", "SFTSV", "ATRA"),
+  c("group", "ATRA_SFTSV", "ATRA"),
+  c("group", "ATRA_SFTSV", "SFTSV")
+)
+
+diff <- map(gps, \(x)
+      data.frame(results(des, contrast = x)) %>%
+        rownames_to_column(var = "name") %>% 
+        mutate(enriched = ifelse(log2FoldChange > 1 & pvalue < 0.05, x[2], 
+                                 ifelse(log2FoldChange < -1 & pvalue < 0.05, x[3], "none")))
+      ) %>% setNames(map_vec(gps, \(x) paste0(x[2:3], collapse = "_vs_")))
+
+# saveRDS(diff, "diff.rds")
+# openxlsx::write.xlsx(diff, 'diff.xlsx')
+
+#### volcano ####
+diff <- readRDS("diff.rds")
+
+#SFTSV_vs_mock
+plot_data <- diff[['SFTSV_vs_mock']] %>% 
+  mutate(.pval = -log10(pvalue)) %>% 
+  within(., {
+    log2FoldChange[log2FoldChange > 9] = 9
+    log2FoldChange[log2FoldChange < -9] = -9
+  } )
+
+ggscatter(plot_data, "log2FoldChange", ".pval", color = "enriched", 
+          xlab = 'log2FoldChange', ylab = "-log10 P-value",
+          palette = c(gp_col, 'none' = 'grey'), size = 1) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  theme(aspect.ratio = 1)
+# ggsave("diff.volcano.SFTSV_vs_mock.pdf", width = 4, height = 5)
+
+#ATRA_SFTSV_vs_SFTSV
+plot_data <- diff[['ATRA_SFTSV_vs_SFTSV']] %>% 
+  mutate(.pval = -log10(pvalue)) %>% 
+  within(., {
+    log2FoldChange[log2FoldChange > 7] = 7
+    log2FoldChange[log2FoldChange < -7] = -7
+  } )
+
+ggscatter(plot_data, "log2FoldChange", ".pval", color = "enriched", 
+          xlab = 'log2FoldChange', ylab = "-log10 P-value",
+          palette = c(gp_col, 'none' = 'grey'), size = 1) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  theme(aspect.ratio = 1)
+
+# tmp
+# ENSG00000095596 CYP26A1 很少检出，只有ATRA组有
+# ENSG00000003137 CYP26B1
+# profile
+# name             mock1 mock2 mock3 ATRA1 ATRA2 ATRA3 SFTSV1 SFTSV2 SFTSV3 ATRA_SFTSV1 ATRA_SFTSV2 ATRA_SFTSV3
+# ENSG00000003137     5     4     8   221   203   205     47     59     38        2531        2819        2661
+
+#SFTSV_vs_mock next
+data <- filter(gene_info, ENSEMBL %in% c('ENSG00000132170','ENSG00000186951','ENSG00000112033',
+                                         'ENSG00000131759','ENSG00000077092','ENSG00000172819',
+                                         'ENSG00000167910','ENSG00000172817','ENSG00000116171',
+                                         'ENSG00000121769','ENSG00000155368','ENSG00000135929',
+                                         'ENSG00000147872','ENSG00000166819'))
+
+kegg_info <- download_KEGG('hsa')
+data <- filter(kegg_info$KEGGPATHID2EXTID, from == 'hsa03320') %>% 
+  left_join(gene_info, by = c('to' = 'ENTREZID')) %>% 
+  filter(!is.na(SYMBOL))
+
+set.seed(2025)
+plot_data <- diff[['SFTSV_vs_mock']] %>% 
+  mutate(.pval = -log10(pvalue),
+         .label = data$SYMBOL[match(name, data$ENSEMBL)]) %>% 
+  filter(abs(log2FoldChange) < 6, .pval < 190)
+
+plot_label <- filter(plot_data, !is.na(.label) & enriched != 'none')
+
+plot_data <- rbind(plot_label, 
+                   filter(plot_data, !name %in% plot_label$name) %>% 
+                     slice_sample(prop = .2))
+  
+ggscatter(plot_data, "log2FoldChange", ".pval", color = "enriched", 
+          xlab = 'log2FoldChange', ylab = "-log10 P-value",
+          palette = c(gp_col, 'none' = 'grey'), size = 1) +
+  ggrepel::geom_label_repel(aes(log2FoldChange, .pval, label = .label), plot_label, size = 2) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  theme(aspect.ratio = 1)
+ggsave("diff.volcano.SFTSV_vs_mock.PPAR.pdf", width = 6, height = 5)
+
+#### ORA 富集分析 GO ####
+#内圈为z-score，不是常规的统计z-score，仅给一个term是更可能降低（负值）或升高（正值）的暗示
+# 计算方法：(up基因数-down基因数)/sqrt(基因数)
+eGO <- map(diff, \(x)
+           filter(x, enriched != 'none') %>% 
+             pull(name) %>% 
+             enrichGO(OrgDb = 'org.Hs.eg.db', keyType = 'ENSEMBL', pvalueCutoff = 1, ont = 'BP') %>% 
+             data.frame() ) 
+# openxlsx::write.xlsx(eGO, 'eGO.xlsx')
+# saveRDS(eGO, 'eGO.rds')
+
+#SFTSV_vs_mock
+plot_data <- eGO[['SFTSV_vs_mock']] %>% 
+  filter(ID %in% c('GO:0050729','GO:0002673','GO:0060759','GO:0002718','GO:0010935',
+                   'GO:0032872','GO:0001959','GO:0002758','GO:0002263','GO:0002526')) %>% 
+  dplyr::select(ID, term = Description, adj_pval = pvalue, genes = geneID) %>% 
+  data.frame(row.names = NULL) %>% 
+  add_column(category = 'BP', .before = 1) %>% 
+  rowwise() %>% 
+  mutate(genes = paste(unlist(strsplit(genes, '/')), collapse = ',')) %>% 
+  circle_dat(., dplyr::select(diff[['SFTSV_vs_mock']], ID = name, logFC = log2FoldChange))
+
+GOCircle(plot_data, title = "SFTSV_vs_mock", label.size = 3, rad1 = 1.5, rad2 = 2.5)
+
+#### ORA 富集分析 KEGG ####
+eKEGG <- map(diff, \(x)
+             filter(x, enriched != 'none') %>% 
+               mutate(ENTREZID = gene_info$ENTREZID[match(name, gene_info$ENSEMBL)]) %>% 
+               pull(name) %>%      
+               enrichKEGG(organism = 'hsa',  keyType = 'ENSEMBL', pvalueCutoff = 1, ont = 'BP') %>% 
+               data.frame() ) 
+openxlsx::write.xlsx(eKEGG, 'eKEGG.xlsx')
+saveRDS(eKEGG, 'eKEGG.rds')
+
+#SFTSV_vs_mock
+plot_data <- eGO[['SFTSV_vs_mock']] %>% 
+  filter(ID %in% c('GO:0050729','GO:0002673','GO:0060759','GO:0002718','GO:0010935',
+                   'GO:0032872','GO:0001959','GO:0002758','GO:0002263','GO:0002526')) %>% 
+  dplyr::select(ID, term = Description, adj_pval = pvalue, genes = geneID) %>% 
+  data.frame(row.names = NULL) %>% 
+  add_column(category = 'BP', .before = 1) %>% 
+  rowwise() %>% 
+  mutate(genes = paste(unlist(strsplit(genes, '/')), collapse = ',')) %>% 
+  circle_dat(., dplyr::select(diff[['SFTSV_vs_mock']], ID = name, logFC = log2FoldChange))
+
+GOCircle(plot_data, title = "SFTSV_vs_mock", label.size = 3, rad1 = 1.5, rad2 = 2.5)
+
+
+#### GSEA 富集分析 GO ####
+gseGO <- map(diff, \(x)
+             left_join(x, gene_info, by = c('name' = 'ENSEMBL')) %>%
+               filter(!is.na(ENTREZID)) %>% 
+               pull(log2FoldChange, name = ENTREZID) %>%
+               sort(decreasing = T) %>% 
+               gseGO(ont = 'ALL', OrgDb = 'org.Hs.eg.db', pvalueCutoff = 1) %>% 
+               data.frame())
+# openxlsx::write.xlsx(gseGO, 'gseGO.xlsx')
+# saveRDS(gseGO, "gseGO.rds")
+
+# show NES
+data <- gseGO %>% 
+  map2(., names(.), \(x, y)
+       dplyr::select(x, id = ID, name = Description, !!y := NES) %>%
+         data.frame(row.names = NULL) ) %>% 
+  purrr::reduce(\(x, y) full_join(x, y, by = c("id", "name"))) %>% 
+  map_df(\(x) ifelse(is.na(x), 0, x))
+# write.table(data, "gseGO.NES.tsv", sep = "\t", row.names = F, quote = F)
+
+# show NES with pval < 0.05
+data <- gseGO %>% 
+  map2(., names(.), \(x, y)
+       dplyr::filter(x, pvalue < 0.05) %>%
+         dplyr::select(id = ID, name = Description, !!y := NES) %>%
+         data.frame(row.names = NULL) ) %>% 
+  purrr::reduce(\(x, y) full_join(x, y, by = c("id", "name"))) %>% 
+  map_df(\(x) ifelse(is.na(x), 0, x))
+# write.table(data, "gseGO.NES.significance.tsv", sep = "\t", row.names = F, quote = F)
+
+#### GSEA 富集分析 KEGG ####
+library(BiocParallel)
+library(enrichplot)
+register(SerialParam())
+
+gene_info <- AnnotationDbi::select(org.Hs.eg.db, keys = keys(org.Hs.eg.db), columns = c("ENSEMBL", "ENTREZID", "SYMBOL"))
+
+gseKEGG <- map(diff, \(x)
+               left_join(x, gene_info, by = c("name" = "ENSEMBL")) %>% 
+                 filter(!is.na(ENTREZID)) %>% 
+                 pull(log2FoldChange, name = ENTREZID) %>%
+                 sort(decreasing = T) %>% 
+                 gseKEGG(organism = "hsa", pvalueCutoff = 1) %>% 
+                 data.frame())
+# openxlsx::write.xlsx(gseKEGG, 'gseKEGG.xlsx')
+# saveRDS(gseKEGG, "gseKEGG.rds")
+
+# show NES
+data <- gseKEGG %>% 
+  map2(., names(.), \(x, y)
+       dplyr::select(x, id = ID, name = Description, !!y := NES) %>%
+         data.frame(row.names = NULL) ) %>% 
+  purrr::reduce(\(x, y) full_join(x, y, by = c("id", "name"))) %>% 
+  map_df(\(x) ifelse(is.na(x), 0, x))
+# write.table(data, "gseKEGG.NES.tsv", sep = "\t", row.names = F, quote = F)
+
+# show NES with pval < 0.05
+data <- gseKEGG %>% 
+  map2(., names(.), \(x, y)
+       dplyr::filter(x, pvalue < 0.05) %>%
+         dplyr::select(id = ID, name = Description, !!y := NES) %>%
+         data.frame(row.names = NULL) ) %>% 
+  purrr::reduce(\(x, y) full_join(x, y, by = c("id", "name"))) %>% 
+  map_df(\(x) ifelse(is.na(x), 0, x))
+# write.table(data, "gseKEGG.NES.significance.tsv", sep = "\t", row.names = F, quote = F)
+
+#### 通路展示 ####
+# 炎性相关
+data <- read.delim("gsea.txt") %>% 
+  mutate(gp = factor(gp, c('ATRA_SFTSV_vs_SFTSV', 'SFTSV_vs_mock')))
+
+order <- filter(data, gp == 'ATRA_SFTSV_vs_SFTSV') %>% 
+  arrange((NES)) %>% 
+  pull(Description)
+
+data <- mutate(data, Description = factor(Description, order))
+
+ggbarplot(data, "Description", "NES", fill = "gp", rotate = T, legend = 'none', 
+          xlab = '', ylab = 'NES-value', width = .7, palette = c('#66c2a5',"#fc8d62"))
+
+# 棒棒糖
+ggdotchart(data, "Description", "NES", color = "gp", rotate = T, legend = 'none', 
+           sorting = "descending",
+           add = "segments", add.params = list(color = 'gp', size = 1), size = 4,
+           xlab = '', ylab = 'NES-value', width = .7, palette = c('#66c2a5',"#fc8d62"))
+ggsave("gsea.dotchart_sort.pdf", width = 6.5, height = 5)
+
+#### path展示 ####
+library(pathview)
+library(org.Hs.eg.db)
+
+kegg_info <- download_KEGG("hsa")
+gene_info <- AnnotationDbi::select(org.Hs.eg.db, keys = keys(org.Hs.eg.db), columns = c("ENSEMBL", "ENTREZID"))
+diff <- readRDS("diff.rds")[c('ATRA_vs_mock', 'SFTSV_vs_mock', 'ATRA_SFTSV_vs_SFTSV')]
+terms <- c('MAPK signaling pathway', 'Retinol metabolism', 'NF-kappa B signaling pathway',
+           'Toll-like receptor signaling pathway','B cell receptor signaling pathway',
+           'JAK-STAT signaling pathway','T cell receptor signaling pathway',
+           'NOD-like receptor signaling pathway', 'RIG-I-like receptor signaling pathway')
+terms <- c('PPAR signaling pathway')
+
+# fmt-1
+map(terms, \(x)
+    map(names(diff), \(y)
+        {
+          suffix <- paste0(gsub(" ", "_", x), ".", y)
+          path_id <- kegg_info$KEGGPATHID2NAME$from[kegg_info$KEGGPATHID2NAME$to == x]
+          data <- kegg_info$KEGGPATHID2EXTID %>% 
+            filter(from == path_id) %>% 
+            left_join(gene_info, by = c('to' = 'ENTREZID')) %>% 
+            left_join(diff[[y]], by = c("ENSEMBL" = "name")) %>% 
+            filter(!is.na(pvalue)) %>% 
+            filter(enriched != "none") %>% 
+            mutate(log2FoldChange = ifelse(log2FoldChange > 0, 1, -1))
+          gene <- structure(data$log2FoldChange, names = data$to)
+          try(pathview(gene.data = gene, pathway.id = path_id, species = "hsa", 
+                       out.suffix = paste0('fmt_1.', suffix), low = "#abd9e9", high = "#fdae61"))
+    } ) )
+
+# fmt-2
+map(terms, \(x)
+    map(names(diff), \(y)
+        {
+          suffix <- paste0(gsub(" ", "_", x), ".", y)
+          path_id <- kegg_info$KEGGPATHID2NAME$from[kegg_info$KEGGPATHID2NAME$to == x]
+          data <- kegg_info$KEGGPATHID2EXTID %>% 
+            filter(from == path_id) %>% 
+            left_join(gene_info, by = c('to' = 'ENTREZID')) %>% 
+            left_join(diff[[y]], by = c("ENSEMBL" = "name")) %>% 
+            filter(!is.na(log2FoldChange))
+          gene <- structure(data$log2FoldChange, names = data$to)
+          try(pathview(gene.data = gene, pathway.id = path_id, species = "hsa", 
+                       out.suffix = paste0('fmt_2.', suffix), low = "#abd9e9", high = "#fdae61"))
+    } ) )
+
+#### MAPK gene heatmap ####
+library(ComplexHeatmap)
+
+fpkm <- read.delim("../data/profile_fpkm.txt")
+gene_info <- AnnotationDbi::select(org.Hs.eg.db, keys = keys(org.Hs.eg.db), 
+                                   columns = c("ENSEMBL", "ENTREZID", 'SYMBOL'))
+
+# N01592 GF-RTK-RAS-ERK signaling pathway
+# N00186 IL1-IL1R-p38 signaling pathway
+# N00188 IL1-IL1R-JNK signaling pathway
+
+genes <- read.delim("/database/KEGG/v20230401/network_hsa.txt", header = F, 
+                    col.names = c('ENTREZID', 'NE')) %>% 
+  mutate(ENTREZID = gsub('hsa:', '', ENTREZID),
+         NE = gsub('ne:', '', NE)) %>% 
+  filter(NE %in% c('N01592')) %>% 
+  mutate(SYMBOL = gene_info$SYMBOL[match(ENTREZID, gene_info$ENTREZID)])
+
+plot_data <- filter(fpkm, name %in% genes$SYMBOL) %>% 
+  column_to_rownames('name')
+
+col_data <- group %>% 
+  mutate(group = factor(group, names(gp_col))) %>% 
+  arrange(group)
+col_annotation <- column_to_rownames(group, 'sample')
+annotation_colors <- list(group = gp_col)
+col_split <- factor(col_data$group)
+
+pdf('MAPK_ab_N01592.heatmap.pdf', width = 6, height = 9)
+pheatmap(plot_data, scale = "row",
+         cluster_cols = F,
+         show_row_dend = F, show_column_dend = F,
+         color = colorRampPalette(c("#307cc0", "white", "#e43589"))(100),
+         cellwidth = 14, cellheight = 8,
+         fontsize_col = 12, fontsize_row = 8,
+         border_color = 'white',
+         annotation_col = col_annotation,
+         annotation_colors = annotation_colors,
+         column_split = col_split,
+         column_gap = unit(0, "mm"),
+         heatmap_legend_param = list(border = "black", title = "Scale FPKM"))
+dev.off()
+
+
+#### Custom heatmap ####
+fpkm <- read.delim("../data/profile_fpkm.txt")
+gene_info <- AnnotationDbi::select(org.Hs.eg.db, keys = keys(org.Hs.eg.db), 
+                                   columns = c("ENSEMBL", "ENTREZID", 'SYMBOL'))
+
+genes <- c('FOSB','FOSL2-AS1','FOS','FOSL1','FOSL2','JUNB','JUND','JUN',
+           'MAPK8','MAPK9','MAPK10','MAPK11','MAPK12','MAPK13','MAP2K3','MAP2K7',
+           'IKBKB','IKBKE','NLRP3','NFKB1','NFKB2','NFKBIZ','RELA','RELB','RIPK2',
+           'IL6','IL10','TNF','NOD2','IL1A', 'IL1B','STAT3','TAB2', 'CASP1',
+           'PYCARD','NLRP1','GSDMD')
+
+plot_data <- filter(fpkm, name %in% genes) %>% 
+  column_to_rownames('name')
+
+col_data <- group %>% 
+  mutate(group = factor(group, names(gp_col))) %>% 
+  arrange(group)
+col_annotation <- column_to_rownames(group, 'sample')
+annotation_colors <- list(group = gp_col)
+col_split <- factor(col_data$group)
+
+pdf('MAPK_ab_Custom.heatmap.pdf', width = 6, height = 7)
+pheatmap(plot_data, scale = "row",
+         cluster_cols = F,
+         treeheight_row = 20,
+         show_column_dend = F,
+         color = colorRampPalette(c("#307cc0", "white", "#e43589"))(100),
+         cellwidth = 14, cellheight = 10,
+         fontsize_col = 12, fontsize_row = 8,
+         border_color = 'white',
+         annotation_col = col_annotation,
+         annotation_colors = annotation_colors,
+         column_split = col_split,
+         column_gap = unit(0, "mm"),
+         heatmap_legend_param = list(border = "black", title = "Scale FPKM"))
+dev.off()
+```

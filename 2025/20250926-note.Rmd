@@ -1,0 +1,199 @@
+---
+title: "MBX Flavonoid PEDV Sus feces, samples donated by Dr. LiMH"
+author: "Jinxin Meng"
+date: "2025-09-26"
+output:
+    prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, eval = F)
+```
+
+## Flavonoid MBX downstream analysis
+
+```{R}
+#### info ####
+data <- read.xlsx('meta_intensity_all.xlsx')
+
+profile <- dplyr::select(data, name = Compound_ID, contains(c('CT', 'PEDV'))) %>% 
+  rename_with(~ sub('all_', '', .x)) %>% 
+  column_to_rownames('name')
+
+group <- data.frame(sample = colnames(profile)) %>% 
+  mutate(group = sub('\\d', '', sample))
+
+group_level <- c('PEDV', 'CT')
+group_color <- c('PEDV' = '#97C8AF', 'CT' = '#96B6D8')
+
+#### PCA ####
+source('/data/mengjx/R_proj/R_func/plot_PCA.R')
+plot_PCA(log10(profile), group, add_group = T, group_color = group_color,
+         lab_size = 4, aspect_ratio = 4/5)
+ggsave('PCA.pdf', width = 5, height = 4)
+
+#### overall ####
+source('/data/mengjx/R_proj/R_func/calcu_difference.R')
+plot_data <- data.frame(value = colSums(profile)) %>% 
+  rownames_to_column('sample') %>% 
+  left_join(group, by = 'sample') 
+
+calcu_diff(plot_data, value ~ group, method = 't')
+
+aggregate(value ~ group, plot_data, mean)
+
+ggboxplot(plot_data, 'group', 'value', fill = 'group', palette = group_color,
+          xlab = '', ylab = 'Abundance', legend = 'none', 
+          title = 'Overall Flavonoid metabolites', subtitle = '(Fold: 4.91)',
+          add = 'jitter', add.params = list(shape = 21, size = 3)) +
+  geom_signif(comparisons = list(group_level)) +
+  scale_y_continuous(labels = scales::scientific) +
+  theme(aspect.ratio = 1,
+        axis.ticks.length = unit(2, 'mm'),
+        plot.title = element_text(face = 'bold', hjust = .5),
+        plot.subtitle = element_text(face = 'bold', hjust = .5))
+ggsave('Overall_MBT.pdf', width = 4, height = 4)
+
+#### class ####
+class_profile <- mutate(
+  profile, class = data$Class[match(rownames(profile), data$Compound_ID)]) %>% 
+  aggregate(. ~ class, ., sum) %>% 
+  column_to_rownames('class')
+  
+difference <- difference_analysis(class_profile, group, comparison = group_level)
+write.xlsx(difference, 'difference_class.xlsx')
+
+plot_data <- data.frame(t(class_profile), check.names = F) %>%
+  rownames_to_column('sample') %>% 
+  left_join(group, by = 'sample')
+
+plots <- map(rownames(class_profile), ~ {
+  dplyr::select(plot_data, group, value = all_of(.x)) %>% 
+    ggboxplot('group', 'value', fill = 'group', palette = group_color,
+              xlab = '', ylab = 'Abundance', legend = 'none', title = .x, 
+              add = 'jitter', add.params = list(shape = 21, size = 3)) +
+    geom_signif(comparisons = list(group_level)) +
+    scale_y_continuous(labels = scales::scientific) +
+    theme(aspect.ratio = 2,
+          axis.ticks.length = unit(2, 'mm'),
+          plot.title = element_text(face = 'bold', hjust = .5)) } )
+cowplot::plot_grid(plotlist = plots, nrow = 1, align = 'v')
+ggsave('difference_class.pdf', width = 18, height = 3.5)
+
+#### MBT ####
+oplsda <- opls(t(log10(profile)), y = pull(group, group), orthoI = NA, predI = 1)
+difference <- difference_analysis(log10(profile), group, comparison = group_level)
+
+result <- data.frame(vip = oplsda@vipVn) %>% 
+  rownames_to_column('name') %>% 
+  left_join(difference, ., by = 'name') %>% 
+  mutate(enriched = ifelse(vip > 1 & padj < 0.05 & log2FC > 0, 'PEDV', 
+                           ifelse(vip > 1 & padj < 0.05 & log2FC < 0, 'CT', 'none'))) %>% 
+  left_join(dplyr::select(data, name = Compound_ID, Name, Name_ch, Class, Class_ch), by = 'name')
+openxlsx::write.xlsx(result, 'difference_MBT.xlsx')
+
+#### Associate with MGX-sgb ####
+library(ComplexHeatmap)
+
+MBX_profile <- read.xlsx('meta_intensity_all.xlsx') %>% 
+  dplyr::select(name = Compound_ID, contains(c('CT', 'PEDV'))) %>% 
+  rename_with(~ sub('all_', '', .x)) %>% 
+  column_to_rownames('name')
+
+MGX_profile <- read.delim('../MGX_WGS_PEDV_Sus_feces/mpa4.sgb.s.tsv', 
+                          row.names = 1, check.names = F) %>% 
+  rename_with(~ sub('-', '', .x)) %>% 
+  dplyr::select(all_of(colnames(MBX_profile))) %>% 
+  filter(!grepl('SGB', rownames(.)))
+
+corr_test <- psych::corr.test(t(MGX_profile), t(MBX_profile), 
+                              method = 'spearman', adjust = 'BH')
+corr_rval <- corr_test$r
+corr_padj <- apply(corr_test$p.adj, 2, \(x) ifelse(x < 0.05, 1, 0))
+
+plot_flag <- corr_rval * corr_padj
+plot_flag <- plot_flag[rowSums(plot_flag > 0) != 0, colSums(plot_flag > 0) != 0]
+
+plot_rval <- corr_rval
+plot_rval <- plot_rval[rownames(plot_flag), colnames(plot_flag)]
+colnames(plot_rval) <- data$Name[match(colnames(plot_rval), data$Compound_ID)]
+
+plot_label <- apply(corr_test$p, 2, \(x) 
+                    ifelse(x < 0.001, '+', 
+                           ifelse(x < 0.01, '**', 
+                                  ifelse(x < 0.05, '*', ''))))
+plot_label <- plot_label[rownames(plot_flag), colnames(plot_flag)]
+colnames(plot_label) <- data$Name[match(colnames(plot_label), data$Compound_ID)]
+
+pdf('Correlation_heatmap_sgb.pdf', width = 20, height = 48)
+pheatmap(plot_rval, 
+         cluster_row = T, cluster_col = T,
+         cellwidth = 15, cellheight = 15, 
+         border_color = 'white', border_gp = gpar(col = 'black'),
+         display_numbers = plot_label, number_color = 'black', 
+         fontsize_number = 12,
+         treeheight_row = 30, treeheight_col = 30,
+         row_names_side = 'left', fontface_row = 'italic',
+         main = 'Spearman correlation between microbial species with metabolites
+         (+: padj<0.001, **: padj<0.01, *:padj<0.05)',
+         heatmap_legend_param = list(title = 'Spearman\nCorrelation'))
+dev.off()
+
+list(corr_rval = data.frame(corr_test$r, check.names = F) %>% 
+       rename_with(~ data$Name[match(.x, data$Compound_ID)]) %>% 
+       rownames_to_column('name'),
+     corr_pval = data.frame(corr_test$p, check.names = F) %>% 
+       rename_with(~ data$Name[match(.x, data$Compound_ID)]) %>% 
+       rownames_to_column('name')) %>% 
+  write.xlsx('Correlation_result_sgb.xlsx')
+
+#### Associate with MGX-gtdb ####
+MGX_profile <- read.delim('../MGX_WGS_PEDV_Sus_feces/mpa4.gtdb.s.tsv', 
+                          row.names = 1, check.names = F) %>% 
+  rename_with(~ sub('-', '', .x)) %>% 
+  dplyr::select(all_of(colnames(MBX_profile))) %>% 
+  filter(!grepl('sp\\d+', rownames(.)))
+
+corr_test <- psych::corr.test(t(MGX_profile), t(MBX_profile), 
+                              method = 'spearman', adjust = 'BH')
+corr_rval <- corr_test$r
+corr_padj <- apply(corr_test$p.adj, 2, \(x) ifelse(x < 0.05, 1, 0))
+
+plot_flag <- corr_rval * corr_padj
+plot_flag <- plot_flag[rowSums(plot_flag > 0) != 0, colSums(plot_flag > 0) != 0]
+
+plot_rval <- corr_rval
+plot_rval <- plot_rval[rownames(plot_flag), colnames(plot_flag)]
+colnames(plot_rval) <- data$Name[match(colnames(plot_rval), data$Compound_ID)]
+
+plot_label <- apply(corr_test$p, 2, \(x) 
+                    ifelse(x < 0.001, '+', 
+                           ifelse(x < 0.01, '**', 
+                                  ifelse(x < 0.05, '*', ''))))
+plot_label <- plot_label[rownames(plot_flag), colnames(plot_flag)]
+colnames(plot_label) <- data$Name[match(colnames(plot_label), data$Compound_ID)]
+
+pdf('Correlation_heatmap_gtdb.pdf', width = 20, height = 38)
+pheatmap(plot_rval, 
+         cluster_row = T, cluster_col = T,
+         cellwidth = 15, cellheight = 15, 
+         border_color = 'white', border_gp = gpar(col = 'black'),
+         display_numbers = plot_label, number_color = 'black', 
+         fontsize_number = 12,
+         treeheight_row = 30, treeheight_col = 30,
+         row_names_side = 'left', fontface_row = 'italic',
+         main = 'Spearman correlation between microbial species with metabolites
+         (+: padj<0.001, **: padj<0.01, *:padj<0.05)',
+         heatmap_legend_param = list(title = 'Spearman\nCorrelation'))
+dev.off()
+
+list(corr_rval = data.frame(corr_test$r, check.names = F) %>% 
+       rename_with(~ data$Name[match(.x, data$Compound_ID)]) %>% 
+       rownames_to_column('name'),
+     corr_pval = data.frame(corr_test$p, check.names = F) %>% 
+       rename_with(~ data$Name[match(.x, data$Compound_ID)]) %>% 
+       rownames_to_column('name')) %>% 
+  write.xlsx('Correlation_result_gtdb.xlsx')
+```
